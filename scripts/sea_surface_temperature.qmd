@@ -32,28 +32,21 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #| label: load packages
 
 #use pacman function to load and install (if required) all other packages
-pacman::p_load(tidyverse, glue, here, janitor, sf, tmap, exactextractr, terra, RColorBrewer, ggplot2, ncdf4, lubridate)
+pacman::p_load(glue, here, sf, tmap, exactextractr, RColorBrewer, ggplot2, ncdf4, lubridate)
 
-if (interactive()) {
-params <- rmarkdown::yaml_front_matter(rstudioapi::getSourceEditorContext()$path)$params
-}
+#install/load the custom RcTools package
+#pak::pak("add-am/RcTools")
+library(RcTools)
 
-#set project variables: crs factor and current_fyear
-proj_crs <- params$project_crs
-fac <- params$disagg_factor
+#define the current year that is being targeted
 current_fyear <- 2025
 
-#load in the custom function used to create the read and write folders for the script
-source(here("functions/script_setup.R"))
+#build the data path variable
+data_path <- here("data/")
 
-#run the function to create the folders and paths
-script_setup()
-
-#turn off s2 geometry
-sf_use_s2(FALSE)
-
-#increase timeout length for slower download speeds
-options(timeout = 360)
+#and create some additional sub folders
+dir.create(glue("{data_path}/raw/"), recursive = TRUE)
+dir.create(glue("{data_path}/processed/"))
 
 ```
 
@@ -66,18 +59,24 @@ Now the script is set up we need to load in all of the required datasets. This w
 
 ## Spatial Data
 
-Load data from the data folder.
+The northern three boundaries are built using a custom function or reloaded from file.
 
-::: {.callout-note}
-## WT Request
-A special request from the WT team is to use their marine boundary, rather than the marine boundary as defined by the NRM groups. Thus below we need to replace to NRM WT boundary with the custom version.
-:::
 
 ``` {r}
 #| label: Load data
 
-#read in the custom function to clean column names into our specific style
-source(here("functions/name_cleaning.R"))
+#if the data is on file, load it, otherwise built it
+if (file.exists(glue("{data_path}/n3_region.gpkg"))){
+  n3_region <- st_read(glue("{data_path}/n3_region.gpkg"))
+} else {
+  n3_region <- build_n3_region()
+}
+
+```
+
+The dataset is then divided into sections for ease of use later on.
+
+```{r}
 
 #cut down the n3 dataset to just the marine region
 n3_marine <- n3_region |> 
@@ -101,7 +100,10 @@ tsv <- st_as_sf(data.frame(Place = "Townsville", x = "-19.2590", y = "146.8169")
 
 ```
 
-This is where the replacement will happen.
+::: {.callout-note}
+## WT Request
+A special request from the WT team is to use their marine boundary, rather than the marine boundary as defined by the NRM groups. Thus below we need to replace to NRM WT boundary with the custom version.
+:::
 
 ```{r}
 #| label: replace WT outline with custom
@@ -121,59 +123,22 @@ n3_marine <- n3_marine |>
 
 ## Sea Surface Temperature
 
-Load in the sea surface temperature data from NOAA's website, thanks to their handy servers we can request and load data directly inside this script.
+Load in the sea surface temperature data from NOAA's website. A custom function has been written that will automatically download the data from the the online servers, then crop the data. If the original or cropped version already exists on your local computer it will not re-download.
 
 ```{r}
 #| label: load in data 
 
-data_path <- here("data/")
+#define the place where full files should be saved
+full_file_loc <- glue("{data_path}/raw/")
 
-#build the base url
-base_url <- "https://www.star.nesdis.noaa.gov/pub/socd/mecb/crw/data/5km/v3.1_op/nc/v1.0/monthly/"
+#define the place where cropped files should be saved
+cropped_file_loc <- glue("{data_path}/processed/")
 
-#get the start date
-d1 <- as.Date("1985-01-01")
+#define the area in which you want to crop data to
+n3_region <- n3_region
 
-#get the end date, then subtract one month (data is approximately 1 month delayed)
-d2 <- floor_date(as.Date(format(Sys.time(), "%Y-%m-%d")), unit = "month") %m-% months(1)
-
-#build a vector of YYYYMM character strings
-date_vect <- format(seq(d1, d2, by = "month"), "%Y%m")
-
-#build an equal length vector of YYYY character strings
-folder_vect <- stringr::str_sub(date_vect, end = -3)
-
-#build an equal length vector of file name character strings to iterate on
-file_names <- glue("{data_path}/sst_{date_vect}.nc")
-
-#build a seoncd vector of file names for the cropped version
-cropped_file_names <- glue("{data_path}/cropped_sst_{date_vect}.nc")
-
-#build an equal length vector of url name character strings to iterate on
-url_names <- glue("{base_url}{folder_vect}/ct5km_sst-mean_v3.1_{date_vect}.nc")
-
-#map over each of the vectors, if the file does not exists locally, download it
-purrr::walk2(file_names, url_names, \(x,y) {if(!file.exists(x)){download.file(y, x, mode = "wb")}})
-
-#convert the provided sf object into a bbox
-target_bbox <- n3_region |> 
-  sf::st_transform("EPSG:4326") |> 
-  sf::st_bbox() |> 
-  st_as_sfc()
-
-#once all files are local, crop each file
-purrr::walk2(file_names, cropped_file_names \(x, y) {
-
-  #read
-  nc <- st_warp(read_stars(test), crs = "EPSG:4326")
-
-  #crop
-  nc_cropped <- sf::st_crop(nc, target_bbox)
-
-  #save
-  write_stars(nc_cropped, y)
-
-})
+#download, save, crop, and build the data
+n3_sst <- sst_extract(full_file_loc, cropped_file_loc, n3_region)
 
 ```
 
