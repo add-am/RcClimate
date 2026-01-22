@@ -4,10 +4,6 @@ subtitle: "A Healthy Waters Partnership Analysis"
 description: "This script analyses and presents sea surface temperature data in the Northern Three reporting regions. The output of this is used in the Northern Three technical reports."
 author: "Adam Shand" 
 format: html
-params: 
-  target_fyear: 2025
-  disagg_factor: 5
-  project_crs: "EPSG:7844"
 ---
 
 # Introduction
@@ -32,7 +28,7 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #| label: load packages
 
 #use pacman function to load and install (if required) all other packages
-pacman::p_load(glue, here, sf, tmap, exactextractr, RColorBrewer, ggplot2, ncdf4, lubridate)
+pacman::p_load(dplyr, tidyr, glue, here, sf, tmap, exactextractr, RColorBrewer, ggplot2, ncdf4, lubridate)
 
 #install/load the custom RcTools package
 #pak::pak("add-am/RcTools")
@@ -41,12 +37,15 @@ library(RcTools)
 #define the current year that is being targeted
 current_fyear <- 2025
 
-#build the data path variable
-data_path <- here("data/")
+#build the data path and output path variables
+data_path <- here("data/sst/")
+output_path <- here("outputs/sst/")
 
 #and create some additional sub folders
 dir.create(glue("{data_path}/raw/"), recursive = TRUE)
 dir.create(glue("{data_path}/processed/"))
+dir.create(glue("{output_path}/plots/"))
+dir.create(glue("{output_path}/maps/"))
 
 ```
 
@@ -61,13 +60,12 @@ Now the script is set up we need to load in all of the required datasets. This w
 
 The northern three boundaries are built using a custom function or reloaded from file.
 
-
 ``` {r}
 #| label: Load data
 
 #if the data is on file, load it, otherwise built it
-if (file.exists(glue("{data_path}/n3_region.gpkg"))){
-  n3_region <- st_read(glue("{data_path}/n3_region.gpkg"))
+if (file.exists("data/n3_region.gpkg")){
+  n3_region <- st_read("data/n3_region.gpkg")
 } else {
   n3_region <- build_n3_region()
 }
@@ -96,7 +94,7 @@ n3_basins <- n3_region |>
   ungroup() |> st_cast()
 
 #create a point for Townsville
-tsv <- st_as_sf(data.frame(Place = "Townsville", x = "-19.2590", y = "146.8169"), coords = c("y", "x"), crs = proj_crs)
+#tsv <- st_as_sf(data.frame(Place = "Townsville", x = "-19.2590", y = "146.8169"), coords = c("y", "x"), crs = proj_crs)
 
 ```
 
@@ -109,15 +107,15 @@ A special request from the WT team is to use their marine boundary, rather than 
 #| label: replace WT outline with custom
 #
 #read in the custom WT outline and edit to match the main dataset
-wt_custom <- st_read(here("data/99. archive/wt_full_marine.gpkg")) |> 
-  name_cleaning() |> 
-  select(Name) |> 
-  rename(Region = Name)
+#wt_custom <- st_read(here("data/99. archive/wt_full_marine.gpkg")) |> 
+#  name_cleaning() |> 
+#  select(Name) |> 
+#  rename(Region = Name)
 
 #remove old WT and add new
-n3_marine <- n3_marine |> 
-  filter(Region != "Wet Tropics") |> 
-  bind_rows(wt_custom)
+#n3_marine <- n3_marine |> 
+#  filter(Region != "Wet Tropics") |> 
+#  bind_rows(wt_custom)
 
 ```
 
@@ -203,8 +201,11 @@ To get data from we need to specify the layers we are interested in. We use the 
 ```{r}
 #| label: calculate monthly mean
 
+#convert object to an terra object for exact extract to work
+test <- terra::rast(n3_sst)
+
 #get mean from all layers
-sst_mean_region <- tibble(exact_extract(n3_sst, n3_marine, fun = "mean", append_cols = T))
+sst_mean_region <- tibble(exact_extract(test, n3_marine, fun = "mean"))
 
 #fix column names
 names(sst_mean_region) <- sub('mean.', '', names(sst_mean_region))
@@ -775,12 +776,6 @@ for (i in n3_marine$Region) {
       tm_shape(region_basins) +
       tm_polygons(fill = "grey90", 
                   col = "black") +
-      tm_shape(tsv) +
-      tm_symbols(size = 0.3, 
-                 fill = "white", 
-                 col = "black", 
-                 lwd = 2, 
-                 shape = 23) +
       tm_text("Place", 
               xmod = -1.8, 
               ymod = 0.1, 

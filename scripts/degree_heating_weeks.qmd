@@ -4,10 +4,6 @@ subtitle: "A Healthy Waters Partnership Analysis"
 description: "This script analyses and presents degree heating week data in the Northern Three reporting regions. The output of this is used in the Northern Three technical reports."
 author: "Adam Shand" 
 format: html
-params: 
-  target_fyear: 2025
-  disagg_factor: 5
-  project_crs: "EPSG:7844"
 ---
 
 # Introduction
@@ -45,22 +41,19 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #use pacman function to load and install (if required) all other packages
 pacman::p_load(tidyverse, glue, here, janitor, sf, tmap, exactextractr, terra, RColorBrewer, ggplot2)
 
-#set project variables: crs factor and current_fyear
-proj_crs <- params$project_crs
-fac <- params$disagg_factor
-current_fyear <- params$target_fyear
+#install/load the custom package
+#pak::pak("add-am/RcTools")
+library(RcTools)
 
-#load in the custom function used to create the read and write folders for the script
-source(here("functions/script_setup.R"))
+#define the target year
+current_fyear <- 2025
 
-#run the function to create the folders and paths
-script_setup()
+#build the data path variable
+data_path <- here("data/dhw/")
 
-#turn off s2 geometry
-sf_use_s2(FALSE)
-
-#increase timeout length for slower download speeds
-options(timeout = 360)
+#and create some additional sub folders
+dir.create(glue("{data_path}/raw/"), recursive = TRUE)
+dir.create(glue("{data_path}/processed/"))
 
 ```
 
@@ -73,41 +66,40 @@ Now the script is set up we need to load in all of the required datasets. This w
 
 ## Spatial Data
 
-Load data from the data folder.
-
-::: {.callout-note}
-## WT Request
-A special request from the WT team is to use their marine boundary, rather than the marine boundary as defined by the NRM groups. Thus below we need to replace to NRM WT boundary with the custom version.
-:::
+The northern three boundaries are built using a custom function or reloaded from file.
 
 ``` {r}
 #| label: Load data
 
-#read in the custom function to clean column names into our specific style
-source(here("functions/name_cleaning.R"))
+#if the data is on file, load it, otherwise built it
+if (file.exists(glue("{data_path}/n3_region.gpkg"))){
+  n3_region <- st_read(glue("{data_path}/n3_region.gpkg"))
+} else {
+  n3_region <- build_n3_region()
+}
 
-#cut down the n3 dataset to marine region
-n3_marine_region <- n3_region |> 
-  name_cleaning() |> 
+```
+
+The dataset is then divided into sections for ease of use later on.
+
+```{r}
+
+#cut down the n3 dataset to just the marine region
+n3_marine <- n3_region |> 
   filter(Environment == "Marine",
          BasinOrZone != "Burdekin Marine",
-         Region != "Burdekin") |>
+         Region != "Burdekin") |> 
   rename(Zone = BasinOrZone) |> 
   mutate(Region = case_when(Region == "Burdekin" ~ "Dry Tropics",
                            T ~ Region)) |> 
-  group_by(Region) |> 
-  summarise(geom = st_union(geom)) |> 
+  group_by(Region) |> summarise(geom = st_union(geom)) |> 
   ungroup() |> st_cast()
 
-#cut down the n3 dataset to everything but the marine region
-n3_basins <- n3_region |> 
-  name_cleaning() |> 
+#cut down to everything but the marine region
+n3_basins <- n3_region |>
   filter(Environment != "Marine") |> 
-  rename(Basin = BasinOrZone) |> 
-  group_by(Region, Basin) |> 
-  summarise(geom = st_union(geom)) |> 
-  ungroup() |> st_cast() |>
-  st_collection_extract("POLYGON")
+  rename(Basin = BasinOrZone) |> group_by(Region, Basin) |> summarise(geom = st_union(geom)) |> 
+  ungroup() |> st_cast()
 
 #read in reef data and update crs
 reefs <- get(data("gbr_feat", package = "gisaimsr")) |> 
@@ -120,19 +112,22 @@ tsv <- st_as_sf(data.frame(Place = "Townsville", x = "-19.2590", y = "146.8169")
 
 ```
 
-This is where the replacement will happen.
+::: {.callout-note}
+## WT Request
+A special request from the WT team is to use their marine boundary, rather than the marine boundary as defined by the NRM groups. Thus below we need to replace to NRM WT boundary with the custom version.
+:::
 
 ```{r}
 #| label: replace WT outline with custom
-
+#
 #read in the custom WT outline and edit to match the main dataset
-wt_custom <- st_read(here("data/99. archive/wt_full_marine.gpkg")) |>
+wt_custom <- st_read(here("data/99. archive/wt_full_marine.gpkg")) |> 
   name_cleaning() |> 
   select(Name) |> 
   rename(Region = Name)
 
 #remove old WT and add new
-n3_marine_region <- n3_marine_region |> 
+n3_marine <- n3_marine |> 
   filter(Region != "Wet Tropics") |> 
   bind_rows(wt_custom)
 
@@ -140,92 +135,22 @@ n3_marine_region <- n3_marine_region |>
 
 ## Degree Heating Week Data
 
-Load in the degree heating week data from NOAA's website, thanks to their handy servers we can request and load data directly inside this script.
+Load in the degree heating week data from NOAA's website. A custom function has been written that will automatically download the data from the the online servers, then crop the data. If the original or cropped version already exists on your local computer it will not re-download.
 
 ```{r}
 #| label: load in data from website
 
-#path to files
-path1 <- glue("{data_path}/n3_dhw.nc")
+#define the place where full files should be saved
+full_file_loc <- glue("{data_path}/raw/")
 
-if (file.exists(path1)) {#if the full cut down version exists open that
-  
-  n3_dhw <- rast(path1)
-  
-} else { #create the cut down version
-  
-  #create folder save location for all the files
-  dowload_path <- glue("{data_path}/dhw_world/")
-  dir.create(dowload_path)
-    
-  #create empty raster for file storing and empty vector for layer names
-  dhw_all <- rast()
-  lyr_names <- vector()
-  
-  #create a vector of numbers (dates) for download
-  date_vect <- 1986:current_fyear
-    
-  for (i in date_vect){#for each year in the vector
-    
-    #create fname for saving
-    fname <- glue("{dowload_path}/dhw_{i}.nc")
-    
-    if (i != format(Sys.time(), '%Y')){#if targeted is NOT the real year set url to the annual datasets
+#define the place where cropped files should be saved
+cropped_file_loc <- glue("{data_path}/processed/")
 
-      url <- glue("https://www.star.nesdis.noaa.gov/pub/socd/mecb/crw/data/5km/v3.1_op/nc/v1.0/annual/ct5km_dhw-max_v3.1_{i}.nc")
-      
-      if (file.exists(fname)){ #if the file is already downloaded open it from source and add it to the raster
-        
-        dhw_all <- c(dhw_all, rast(fname) |> subset(1))
-        
-        } else { #otherwise download the file using the url then append to the raster
-          
-          download.file(url, fname, mode = "wb")
-         
-          dhw_all <- c(dhw_all, rast(fname) |> subset(1))
-        }
-    
-    } else {#set the url to the rolling (year to date) datasets
-      
-      url <- glue("https://www.star.nesdis.noaa.gov/pub/sod/mecb/crw/data/5km/v3.1_op/nc/v1.0/daily/year-to-date/ct5km_dhw-max-ytd_v3.1_{i}0630.nc")
-      
-      if (file.exists(fname)){ #if the file is already downloaded open it from source and add it to the raster
-        
-        dhw_all <- c(dhw_all, rast(fname) |> subset(1))
-        
-        } else { #otherwise download the file using the url then append to the raster
-          
-          download.file(url, fname, mode = "wb")
-         
-          dhw_all <- c(dhw_all, rast(fname) |> subset(1))
-        }
+#define the area in which you want to crop data to
+n3_region <- n3_region
 
-    }
-    
-    #keep track of layer names
-    lyr_names <- append(lyr_names, glue::glue("dhw_{i}"))
-      
-  }
-  
-  #set crs
-  crs(dhw_all) <- proj_crs
-  
-  #add names
-  names(dhw_all) <- lyr_names
-    
-  #crop the data
-  n3_dhw <- crop(dhw_all, n3_marine_region) |> mask(n3_marine_region)
-      
-  #save all years of data
-  writeCDF(n3_dhw, path1, overwrite = T)
-  
-  #reload data
-  n3_dhw <- rast(path1)
-    
-  #clean up
-  rm(url, fname, lyr_names, path1)
-
-}
+#download, save, crop, and build the data
+n3_dhw <- dhw_extract(full_file_loc, cropped_file_loc, n3_region)
     
 ```
 
@@ -298,7 +223,7 @@ dhw_lab <- c("Low likelihood of bleaching (0 - 2 DHW)",
              "Severe bleaching likely (>8 DHW)")
 
 #create a vector of the three n3 regions
-n3_marine_names <- unique(n3_marine_region$Region)
+n3_marine_names <- unique(n3_marine$Region)
 
 ```
 
@@ -313,7 +238,7 @@ First we can plot a single year of data to get an idea of how things look.
 for (i in n3_marine_names) {
   
   #filter by region
-  region_basins <- n3_marine_region |> filter(Region == i)
+  region_basins <- n3_marine |> filter(Region == i)
   
   #get the associated basins
   basins <- n3_basins |> filter(Region == i)
@@ -398,7 +323,7 @@ Then we can create the 5 year map, please note that this was one of the previous
 for (i in n3_marine_names) {
   
   #filter all basins by region
-  region_basins <- n3_marine_region |> filter(Region == i)
+  region_basins <- n3_marine |> filter(Region == i)
   
   #get the associated basins
   basins <- n3_basins |> filter(Region == i)
@@ -458,7 +383,7 @@ For the purposes of our report we will also need to save a summary table with so
 process_region_year <- function(region_name, year_index) {
   
   #what region are we looking at?
-  region_basins <- n3_marine_region |> 
+  region_basins <- n3_marine |> 
     filter(Region == region_name)
   
   #mask to the specific region and year
