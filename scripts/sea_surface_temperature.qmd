@@ -28,23 +28,25 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #| label: load packages
 
 #use pacman function to load and install (if required) all other packages
-pacman::p_load(dplyr, tidyr, glue, here, sf, tmap, exactextractr, RColorBrewer, ggplot2, ncdf4, lubridate)
+pacman::p_load(dplyr, tidyr, readr, purrr, stars, glue, here, sf, tmap, RColorBrewer, ggplot2, ncdf4, lubridate)
 
 #install/load the custom RcTools package
 #pak::pak("add-am/RcTools")
 library(RcTools)
 
-#define the current year that is being targeted
-current_fyear <- 2025
+#define the script crs and target year
+script_crs <- "EPSG:7855"
+script_fyear <- 2025
+script_fac <- 5
 
 #build the data path and output path variables
 data_path <- here("data/sst/")
-output_path <- here("outputs/sst/")
+output_path <- here(glue("outputs/sst/{script_fyear}/"))
 
 #and create some additional sub folders
 dir.create(glue("{data_path}/raw/"), recursive = TRUE)
 dir.create(glue("{data_path}/processed/"))
-dir.create(glue("{output_path}/plots/"))
+dir.create(glue("{output_path}/plots/"), recursive = TRUE)
 dir.create(glue("{output_path}/maps/"))
 
 ```
@@ -63,11 +65,12 @@ The northern three boundaries are built using a custom function or reloaded from
 ``` {r}
 #| label: Load data
 
-#if the data is on file, load it, otherwise built it
+#if the data is on file, load it, otherwise built it and save it for next time
 if (file.exists("data/n3_region.gpkg")){
   n3_region <- st_read("data/n3_region.gpkg")
 } else {
   n3_region <- build_n3_region()
+  st_write(n3_region, "data/n3_region.gpkg")
 }
 
 ```
@@ -155,7 +158,7 @@ The NetCDF/Raster format provides data that is stacked into layers. Each layer c
 
 Below we create a table to provide insight into each layer of data. Using the layer_date column confirm that the data is current.
 
-You can think of this table as a "key" that we will use to determine what layer names are associated with your choice of year, month, day, or financial year. Knowing the name of the layer is essential to select the layer from the data. For example, filtering by fyear_end = `r current_fyear` gives us all the relevant layer names.
+You can think of this table as a "key" that we will use to determine what layer names are associated with your choice of year, month, day, or financial year. Knowing the name of the layer is essential to select the layer from the data. For example, filtering by fyear_end = `r script_fyear` gives us all the relevant layer names.
 
 ```{r}
 #| label: Creating Table Key
@@ -196,38 +199,62 @@ First up is mean the exact means we are going to calculate are as follows:
 
 This happens first at the monthly time frame. It is important to note that the monthly MEAN is the mean of all the sea surface temperature cells across the region. I.e. This is a spatial mean.
 
-To get data from we need to specify the layers we are interested in. We use the "key table" from earlier to help here. For example, below I specify I want layers from the `r current_fyear` financial year. (This can be updated by changing the globally set current_fyear variable).
+To get data from we need to specify the layers we are interested in. We use the "key table" from earlier to help here. For example, below I specify I want layers from the `r script_fyear` financial year. (This can be updated by changing the globally set script_fyear variable).
 
 ```{r}
 #| label: calculate monthly mean
 
 #convert object to an terra object for exact extract to work
-test <- terra::rast(n3_sst)
+#test <- terra::rast(n3_sst)
+
+#update the crs of the data to match the n3 region geometry
+n3_sst <- st_warp(n3_sst, crs = "EPSG:7855")
 
 #get mean from all layers
-sst_mean_region <- tibble(exact_extract(test, n3_marine, fun = "mean"))
+#sst_mean_region <- tibble(exact_extract(n3_sst, n3_marine, fun = "mean"))
+
+#library(stars)
+
+#get mean from all layers and convert into a table, clean column names and add metadata
+n3_sst_tbl <- n3_sst |>
+  aggregate(n3_marine, FUN = mean, na.rm = TRUE) |> 
+  as.data.frame() |> 
+  rename("MonthlyMeanSst" = 3, "LayerDate" = "time") |> 
+  left_join(name_date_tbl, by = "LayerDate") |> 
+  mutate(Region = rep(n3_marine$Region, nrow(name_date_tbl))) |> 
+  select(-geom)
+
+#test <- slice(n3_sst_tbl, 1:3) |> 
+  #st_as_sf()
+
+#test_agg_tbl <- test_agg |> #st_drop_geometry() |> 
+#  as.data.frame() #|> pivot_longer( cols = -geom, names_to = "time", values_to = "mean_sst" )
+
+
 
 #fix column names
-names(sst_mean_region) <- sub('mean.', '', names(sst_mean_region))
+#names(sst_mean_region) <- sub('mean.', '', names(sst_mean_region))
 
 #pivot the data and round values, then use left_join() to add time values, year, mon, and fyear from the key table
-monthly_region_sst <- pivot_longer(sst_mean_region, cols = 3:ncol(sst_mean_region),
-                                   names_to = "LayerName", values_to = "MonthlyMeanSst") |>
-  mutate(MonthlyMeanSst = round(MonthlyMeanSst, 1)) |>
-  left_join(name_date_tbl, by = "LayerName")
+#monthly_region_sst <- pivot_longer(sst_mean_region, cols = 3:ncol(sst_mean_region),
+#                                   names_to = "LayerName", values_to = "MonthlyMeanSst") |>
+#  mutate(MonthlyMeanSst = round(MonthlyMeanSst, 1)) |>
+#  left_join(name_date_tbl, by = "LayerName")
 
-#remove financial years without a full set of data (sually just 1911, and sometimes the most recent fyear).
-removal_rows <- monthly_region_sst |> 
+#remove financial years without a full set of data (usually just 1911, and sometimes the most recent fyear).
+removal_rows <- n3_sst_tbl |> 
   group_by(Region, Fyear) |> 
   summarise(MonthCount = length(unique(Month))) |> 
   ungroup() |> 
   filter(MonthCount < 12)
 
 #subtract from the main table, any rows that appear in the removal table
-monthly_region_sst <- anti_join(monthly_region_sst, removal_rows, by = "Fyear")
+monthly_region_sst <- n3_sst_tbl |> 
+  anti_join(removal_rows, by = "Fyear")# |> 
+  #st_as_sf()
 
 #clean up
-rm(sst_mean_region, removal_rows)
+#rm(sst_mean_region, removal_rows)
 
 ```
 
@@ -270,7 +297,7 @@ However, for the most part. we only need to keep the current year of data, and t
 
 #remove everything we don't need
 annual_region_sst <- annual_region_sst |> 
-  filter(Fyear %in% c((1991:2020), current_fyear))
+  filter(Fyear %in% c((1991:2020), script_fyear))
 
 ```
 
@@ -373,7 +400,7 @@ The final table we need to create is the simplified percentiles table that will 
 
 #filter for current year and drop unnecessary columns
 monthly_percentiles_tbl <- summary_tbl |> 
-  filter(Fyear == current_fyear) |> 
+  filter(Fyear == script_fyear) |> 
   select(c(Region, Month, MonthlyMeanSstPercentileRank, AnnualMeanSstPercentileRank))
 
 #standardise values for each group
@@ -406,10 +433,18 @@ Where:
 #| label: load and use conditional formatting function
 
 #read in climate condition formatting function
-source(here("functions/cond_form_climate.R"))
+#source(here("functions/cond_form_climate.R"))
+
+save_n3_table(
+  df = monthly_per_wide,
+  file_name = glue("{output_path}/sea-surface-temperature_monthly-percentiles"),
+  target_columns = 2:ncol(monthly_per_wide),
+  target_rows = 1:nrow(monthly_per_wide),
+  scheme = "Temperature"
+)
 
 #run function, noting to specify which colour system we want to use
-cond_form_climate(monthly_per_wide, glue("{output_path}/sea-surface-temperature_monthly-percentiles"), indicator = "sea_surface_temperature")
+#cond_form_climate(monthly_per_wide, glue("{output_path}/sea-surface-temperature_monthly-percentiles"), indicator = "sea_surface_temperature")
 
 ```
 
@@ -558,7 +593,7 @@ for (i in n3_marine$Region) {
               MinSst = quantile(MonthlyMeanSst, 0.3))
   
   #get a current year table
-  cy_region <- summary_tbl |> filter(Region == i, Fyear == current_fyear)
+  cy_region <- summary_tbl |> filter(Region == i, Fyear == script_fyear)
   
   #plot the graph
   plot <- ggplot() +
@@ -571,7 +606,7 @@ for (i in n3_marine$Region) {
     scale_color_identity(name = "Temperature", labels = c("Long-Term Mean", "Financial Year"), guide = "legend") +
     scale_x_continuous(name = "", breaks = 1:12, labels = cy_region$Month, expand = c(0, 0)) +
     scale_y_continuous(name = "Temperature (°C)", expand = c(0, 0)) +
-    ggtitle(glue("Monthly temperature in the {i} basin for the {current_fyear} financial year")) +
+    ggtitle(glue("Monthly temperature in the {i} basin for the {script_fyear} financial year")) +
     theme(panel.background = element_blank(), panel.border = element_blank(), panel.grid.major = element_blank(),
           axis.title.x = element_blank(), axis.line = element_line(colour = "black"),
           plot.title = element_text(hjust = 0.5))
@@ -603,55 +638,78 @@ In the first code chunk we create each of the raster layers required.
 ```{r}
 #| label: get map for current year
 
-#select only the current financial year
-target_period <- name_date_tbl |> filter(Fyear == current_fyear)
+#use the aggregation helper to group data into annual layers
+n3_sst_annual <- nc_aggregation_helper(n3_sst, "Annual")
 
-#create a mean of current fyear map
-cy_sst_map <- mean(subset(n3_sst, target_period$LayerName))
+#pull out the most recent layer
+cy_sst_map <- n3_sst_annual[,,,which(st_get_dimension_values(n3_sst_annual, "time") %in% script_fyear)]
+
+#and pull out the 30 year ltm layers then get their overall average
+ltm_30_stack <- n3_sst_annual[,,,which(st_get_dimension_values(n3_sst_annual, "time") %in% 1991:2020)]
+ltm_30_mean <- st_apply(ltm_30_stack, c(1,2), mean, na.rm = TRUE)
+
+#subtract the ltm from the current to determine the anomaly
+anom_sst_map <- cy_sst_map - ltm_30_mean
+
+#crop each of the layers
+cy_sst_map_crop <- st_crop(cy_sst_map, n3_marine)
+anom_sst_map_crop <- st_crop(anom_sst_map, n3_marine)
+
+#cy_sst_map <- mean(subset(n3_sst, target_period$LayerName))
 
 #create an empty SpatRaster to store the 30-year long term mean data
-ltm_30_stack <- rast()
+#ltm_30_stack <- rast()
 
-for (i in 1991:2020) {
+#for (i in 1991:2020) {
   
   #create a name based on iteration
-  layer_name <- glue("fyear_{i-1}_{i}")
+  #layer_name <- glue("fyear_{i-1}_{i}")
+
+  #select only the current financial year from the reference table
+  #target_period <- name_date_tbl |> filter(Fyear == i)
+
+  #return the index of each layer that shares a date with the target table
+  #layer_index <- as.vector(which(st_get_dimension_values(n3_sst, "time") %in% as.Date(target_period$LayerDate)))
+
+  #extract those layers and then create a mean of current fyear map
+  #cy_sst_map <- n3_sst[,,,layer_index] |> 
+  #  st_apply(c(1,2), mean, na.rm = TRUE)
   
   #create a subset of the name_date_tbl for the date range
-  target_period <- name_date_tbl |> filter(Fyear == i)
+  #target_period <- name_date_tbl |> filter(Fyear == i)
   
   #Use subset to select layers and take the mean for the yearr
-  raster_layer <- mean(subset(n3_sst, target_period$LayerName))
+  #raster_layer <- mean(subset(n3_sst, target_period$LayerName))
   
   #update layer name
-  names(raster_layer) <- layer_name
+  #names(raster_layer) <- layer_name
     
   #put layers into a single stack
-  ltm_30_stack <- c(ltm_30_stack, raster_layer)
+  #ltm_30_stack <- c(ltm_30_stack, raster_layer)
 
-}
+#}
 
 #create a ltm map
-ltm_30_sst_map <- mean(ltm_30_stack)
+#ltm_30_sst_map <- mean(ltm_30_stack)
 
 #put the two SpatRasters into one for next operation
-anom_rast <- c(cy_sst_map, ltm_30_sst_map)
+#anom_rast <- c(cy_sst_map, ltm_30_sst_map)
 
 #subtract ltm from cy mean to get an anomaly map
-anom_sst_map <- lapp(anom_rast, fun = function(r1, r2){return(r1 - r2)})  
+#anom_sst_map <- lapp(anom_rast, fun = function(r1, r2){return(r1 - r2)})  
 
 #rename layer
-names(anom_sst_map) <- "Sea-Surface-Temperature_Anomaly_(C)"
+#names(anom_sst_map) <- "Sea-Surface-Temperature_Anomaly_(C)"
 
 #interpolate data to increase resolution and therefore accuracy
-if (fac > 1) {
-  cy_sst_map <- disagg(cy_sst_map, fac, "bilinear")
-  anom_sst_map <- disagg(anom_sst_map, fac, "bilinear")
-}
+#if (fac > 1) {
+#  cy_sst_map <- disagg(cy_sst_map, fac, "bilinear")
+#  anom_sst_map <- disagg(anom_sst_map, fac, "bilinear")
+#}
 
 #then mask again to get a precise border
-cy_sst_n3_crop <- mask(cy_sst_map, vect(n3_marine))
-anom_sst_n3_crop <- mask(anom_sst_map, vect(n3_marine))
+#cy_sst_n3_crop <- mask(cy_sst_map, vect(n3_marine))
+#anom_sst_n3_crop <- mask(anom_sst_map, vect(n3_marine))
 
 ```
 
@@ -670,45 +728,61 @@ Extra Note - it seems that each year past 2020 has been in itself an extreme. So
 ```{r}
 #| label: finding the largest anomalies
 
+#compare every year against the 30 year ltm
+all_anom_layers <- purrr::map(seq(dim(n3_sst_annual)[[3]]), \(x) {n3_sst_annual[,,,x] - ltm_30_mean})
+
+#stack all comparisons into a single stars object
+sst_all <- do.call(c, c(all_anom_layers, list(along = "time")))
+
+#max(sst_all)
+
+#extract the results into a simple table
+#all_anom_tbl <- bind_rows(map(all_anom_layers, as_tibble))
+
+#then retreive a min and max value
+#anom_min_val <- min(all_anom_tbl$cropped_sst_198501.nc, na.rm = TRUE)
+#anom_max_val <- max(all_anom_tbl$cropped_sst_198501.nc, na.rm = TRUE)
+
+
+#test <- as_tibble(all_anom_maps[[1]])
+
+  #subtract the ltm from the current to determine the anomaly
+  #anom_sst_map <- 
+
+
+#}
+
 #create an empty raster to store the output
-all_anomalies <- rast()
+#all_anomalies <- rast()
 
 #for each fyear in the 30 year period, calculate the annual value, then compare it to the ltm value and save the anomalies for that year
-for (i in 1991:2023){
+#for (i in 1991:2023){
   
   #create a name based on iteration
-  layer_name <- glue("fyear_{i-1}_{i}")
+ # layer_name <- glue("fyear_{i-1}_{i}")
   
   #create a subset of the name_date_tbl for the date range
-  target_period <- name_date_tbl |> filter(Fyear == i)
+  #target_period <- name_date_tbl |> filter(Fyear == i)
   
   #Use subset to select layers and sum into a single layer
-  raster_layer <- mean(subset(n3_sst, target_period$LayerName))
+  #raster_layer <- mean(subset(n3_sst, target_period$LayerName))
   
   #update layer name
-  names(raster_layer) <- layer_name
+  #names(raster_layer) <- layer_name
 
   #put the two SpatRasters into one for next operation
-  comparison_rast <- c(raster_layer, ltm_30_sst_map)
+  #comparison_rast <- c(raster_layer, ltm_30_sst_map)
   
   #subtract ltm from target year mean to get an anomaly map
-  comparison_rast_map <- lapp(comparison_rast, fun = function(r1, r2){return(r1 - r2)})
+  #comparison_rast_map <- lapp(comparison_rast, fun = function(r1, r2){return(r1 - r2)})
   
   #rename layer
-  names(comparison_rast_map) <- glue("fyear_{i-1}_{i}")
+  #names(comparison_rast_map) <- glue("fyear_{i-1}_{i}")
   
   #stack all the comparisons together to be looked through later
-  all_anomalies <- c(all_anomalies, comparison_rast_map)
+  #all_anomalies <- c(all_anomalies, comparison_rast_map)
   
-}
-
-#interpolate data to increase resolution and therefore accuracy
-if (fac > 1) {
-  all_anomalies <- disagg(all_anomalies, fac, "bilinear")
-}
-
-#then mask again to get a precise border
-all_anomalies_n3_crop <- mask(all_anomalies, vect(n3_marine))
+#}
 
 ```
 
@@ -718,18 +792,46 @@ We also need to check if the anomaly for the current year exceeds the maximum an
 #| label: add cy anomaly to the stack
 
 #stack together
-all_anomalies_n3_crop <- c(all_anomalies_n3_crop, anom_sst_n3_crop)
+#all_anomalies_n3_crop <- c(all_anomalies_n3_crop, anom_sst_n3_crop)
 
 ```
 
 We can then plot the current year, and current year anomaly, sst data at a region level and basin level.
 
+
+```{r}
+
+#interpolate data to increase resolution and therefore accuracy
+if (script_fac > 1) {
+
+  #create the new resolution object and warp, all in the same move as a custom func
+  dis_agg_fnc <- function(x){   
+    st_warp(x, st_as_stars(
+      st_bbox(x), 
+      dx = (1/script_fac) * st_dimensions(x)$x$delta, 
+      dy = (1/script_fac) * st_dimensions(x)$y$delta
+    ), method = "bilinear", use_gdal = TRUE)
+  }
+
+  #run the function
+  cy_sst_map_crop <- dis_agg_fnc(cy_sst_map_crop[,,,, drop = TRUE])
+  anom_sst_map_crop <- dis_agg_fnc(anom_sst_map_crop[,,,, drop = TRUE])
+  sst_all <- dis_agg_fnc(sst_all)
+
+  #then mask again to get a precise border
+  cy_sst_map_crop <- st_crop(cy_sst_map_crop, n3_marine)
+  anom_sst_map_crop <- st_crop(anom_sst_map_crop, n3_marine)
+  sst_all <- st_crop(sst_all, n3_marine)
+}
+
+```
+
 ```{r}
 #| label: plot cy and ltm temperature map
 
 #change name of layer for plot
-names(cy_sst_n3_crop) <- "Mean SST (°C)"
-names(anom_sst_n3_crop) <- "Anom. SST (°C)"
+names(cy_sst_map_crop) <- "Mean SST (°C)"
+names(anom_sst_map_crop) <- "Anom. SST (°C)"
 
 #create some vectors of objects in the global environment to iterate over
 map_type <- c("anom", "cy")
@@ -746,18 +848,31 @@ for (i in n3_marine$Region) {
   #get the associated basins
   region_basins <- n3_basins |> filter(Region == i)
 
+  #crop to the specific region
+  cy <- st_crop(cy_sst_map_crop, target_region)
+  anom <- st_crop(anom_sst_map_crop, target_region)
+  all_anoms <- st_crop(sst_all, target_region)
+
   #mask to the specific region
-  cy <- trim(mask(cy_sst_n3_crop, vect(target_region)))
-  anom <- trim(mask(anom_sst_n3_crop, vect(target_region)))
-  all_anoms_stack <- trim(mask(all_anomalies_n3_crop, vect(target_region)))
+  #cy <- trim(mask(cy_sst_n3_crop, vect(target_region)))
+  #anom <- trim(mask(anom_sst_n3_crop, vect(target_region)))
+  #all_anoms_stack <- trim(mask(all_anomalies_n3_crop, vect(target_region)))
   
   #calculate the breaks for the cy legend based on the min and max for the actually cy data
-  cy_break <- plyr::round_any(seq(from = minmax(cy)[1], to = minmax(cy)[2], length.out = 11), 0.01)
+  cy_break <- plyr::round_any(
+    seq(
+      from = min(cy[[1]], na.rm = TRUE), 
+      to = max(cy[[1]], na.rm = TRUE), 
+      length.out = 11), 
+    0.01)
 
-  #calculate the breaks for the anom legend based on the min and max for all 30 years of ltm data
-  anom_break <- plyr::round_any(seq(from = min(as.data.frame(minmax(all_anoms_stack))), 
-                                         to = max(as.data.frame(minmax(all_anoms_stack))), 
-                                         length.out = 11), 0.1)
+  #calculate the breaks for the anom legend based on the min and max for all years of data compared to the ltm
+  anom_break <- plyr::round_any(
+    seq(
+      from = min(all_anoms[[1]], na.rm = TRUE), 
+      to = max(all_anoms[[1]], na.rm = TRUE), 
+      length.out = 11), 
+    0.1)
   
   for (j in 1:2){
     
