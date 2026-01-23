@@ -1,6 +1,7 @@
 /.quarto/
 **/*.quarto_ipynb
 
+#particularly large file types
 *.gpkg
 *.gdb
 *.nc
