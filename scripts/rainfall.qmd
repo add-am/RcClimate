@@ -26,24 +26,25 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #| label: load packages
 
 #use pacman function to load and install (if required) all other packages
-pacman::p_load(glue, here, sf, tmap, exactextractr, terra, RColorBrewer, ggplot2, openxlsx2, stars)
+pacman::p_load(dplyr, glue, here, sf, tmap, exactextractr, terra, RColorBrewer, ggplot2, openxlsx2, stars)
 
-#install custom package if needed
+#install/load the custom RcTools package
 pak::pak("add-am/RcTools")
-
-#load package
 library(RcTools)
 
-#define the targeted financial year
-current_fyear <- 2025
+#define the script crs and target year
+script_crs <- "EPSG:7855"
+script_year <- 2025
 
-#build some paths and folders
-data_path <- here("data/")
-output_path <- here("outputs/")
+#build the data path and output path variables
+data_path <- here("data/rainfall/")
+output_path <- here(glue("outputs/rainfall/{script_year}/"))
 
-dir.create(data_path)
-dir.create(glue("{output_path}/maps/"), recursive = TRUE)
-dir.create(glue("{output_path}/plots/"))
+#and create some additional sub folders
+dir.create(glue("{data_path}/raw/"), recursive = TRUE)
+dir.create(glue("{data_path}/processed/"))
+dir.create(glue("{output_path}/plots/"), recursive = TRUE)
+dir.create(glue("{output_path}/maps/"))
 
 ```
 
@@ -61,18 +62,14 @@ The n3 region is built by a custom function from the RcTools package.
 ``` {r}
 #| label: Load data
 
-#if the data exists on file, read it in
-if (any(file.exists("n3_region.gpkg", data_path))){
-
-  n3_region <- st_read(glue("{data_path}/n3_region.gpkg"))
-
-#otherwise, build it using the function and save to file
+#if the data is on file, load it, otherwise built it and save it for next time
+if (file.exists(here("data/n3_region.gpkg"))){
+  n3_region <- st_read(here("data/n3_region.gpkg"))
 } else {
-  
   n3_region <- build_n3_region()
-
-  st_write(n3_region, glue("{data_path}/n3_region.gpkg"))
+  st_write(n3_region, here("data/n3_region.gpkg"))
 }
+
 
 ```
 
@@ -111,20 +108,15 @@ Rainfall data is provided from the BOM AWO portal. A custom function has been wr
 ```{r}
 #| label: Reading Data
 
-#define the name of the dataset to be saved on file (or read back in)
-data_name <- "n3_rainfall.nc"
+#define the path and name of the dataset to be saved on file (or read back in)
+data_name <- glue("{data_path}/n3_rainfall.nc")
 
-#check if the data exists on file, if it does read it in
-if (data_name %in% list.files(glue("{data_path}"))){
-
-  rain_data <- st_read(glue("{data_path}/data_name"))
-
-#otherwise use the custom function to extract the data from the API
+#if the data is on file, load it, otherwise built it and save it for next time
+if (file.exists(data_name)){
+  rain_data <- st_read(data_name)
 } else {
-
   rain_data <- rainfall_extract(n3_region)
-
-  write_stars(rain_data, glue("{data_path}/data_name"))
+  write_stars(rain_data, data_name)
 }
 
 ```

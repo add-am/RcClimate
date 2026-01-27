@@ -1,1 +1,0 @@
-This is a placeholder to ensure the land_use folder is uploaded to GitHub.

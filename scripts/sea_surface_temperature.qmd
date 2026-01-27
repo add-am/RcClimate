@@ -39,6 +39,8 @@ script_crs <- "EPSG:7855"
 script_fyear <- 2025
 script_fac <- 5
 
+sf_use_s2(FALSE)
+
 #build the data path and output path variables
 data_path <- here("data/sst/")
 output_path <- here(glue("outputs/sst/{script_fyear}/"))
@@ -66,11 +68,11 @@ The northern three boundaries are built using a custom function or reloaded from
 #| label: Load data
 
 #if the data is on file, load it, otherwise built it and save it for next time
-if (file.exists("data/n3_region.gpkg")){
-  n3_region <- st_read("data/n3_region.gpkg")
+if (file.exists(here("data/n3_region.gpkg"))){
+  n3_region <- st_read(here("data/n3_region.gpkg"))
 } else {
   n3_region <- build_n3_region()
-  st_write(n3_region, "data/n3_region.gpkg")
+  st_write(n3_region, here("data/n3_region.gpkg"))
 }
 
 ```
@@ -96,29 +98,26 @@ n3_basins <- n3_region |>
   rename(Basin = BasinOrZone) |> group_by(Region, Basin) |> summarise(geom = st_union(geom)) |> 
   ungroup() |> st_cast()
 
-#create a point for Townsville
-#tsv <- st_as_sf(data.frame(Place = "Townsville", x = "-19.2590", y = "146.8169"), coords = c("y", "x"), crs = proj_crs)
-
 ```
 
 ::: {.callout-note}
 ## WT Request
-A special request from the WT team is to use their marine boundary, rather than the marine boundary as defined by the NRM groups. Thus below we need to replace to NRM WT boundary with the custom version.
+A special request from the WT team is to use their marine boundary, rather than the marine boundary as defined by the NRM groups. Thus below we need to replace to NRM WT boundary with the custom version. Note that this outline was provided by the WT team and has no online equivalent.
 :::
 
 ```{r}
 #| label: replace WT outline with custom
 #
 #read in the custom WT outline and edit to match the main dataset
-#wt_custom <- st_read(here("data/99. archive/wt_full_marine.gpkg")) |> 
-#  name_cleaning() |> 
-#  select(Name) |> 
-#  rename(Region = Name)
+wt_custom <- st_read(here("data/historical_wt_boundary.gpkg")) |> 
+  name_cleaning() |> 
+  select(Name) |> 
+  rename(Region = Name)
 
 #remove old WT and add new
-#n3_marine <- n3_marine |> 
-#  filter(Region != "Wet Tropics") |> 
-#  bind_rows(wt_custom)
+n3_marine <- n3_marine |> 
+  filter(Region != "Wet Tropics") |> 
+  bind_rows(wt_custom)
 
 ```
 
@@ -140,6 +139,9 @@ n3_region <- n3_region
 
 #download, save, crop, and build the data
 n3_sst <- sst_extract(full_file_loc, cropped_file_loc, n3_region)
+
+#update the crs of the data to match the n3 region geometry
+n3_sst <- st_warp(n3_sst, crs = "EPSG:7855")
 
 ```
 
@@ -204,17 +206,6 @@ To get data from we need to specify the layers we are interested in. We use the 
 ```{r}
 #| label: calculate monthly mean
 
-#convert object to an terra object for exact extract to work
-#test <- terra::rast(n3_sst)
-
-#update the crs of the data to match the n3 region geometry
-n3_sst <- st_warp(n3_sst, crs = "EPSG:7855")
-
-#get mean from all layers
-#sst_mean_region <- tibble(exact_extract(n3_sst, n3_marine, fun = "mean"))
-
-#library(stars)
-
 #get mean from all layers and convert into a table, clean column names and add metadata
 n3_sst_tbl <- n3_sst |>
   aggregate(n3_marine, FUN = mean, na.rm = TRUE) |> 
@@ -223,23 +214,6 @@ n3_sst_tbl <- n3_sst |>
   left_join(name_date_tbl, by = "LayerDate") |> 
   mutate(Region = rep(n3_marine$Region, nrow(name_date_tbl))) |> 
   select(-geom)
-
-#test <- slice(n3_sst_tbl, 1:3) |> 
-  #st_as_sf()
-
-#test_agg_tbl <- test_agg |> #st_drop_geometry() |> 
-#  as.data.frame() #|> pivot_longer( cols = -geom, names_to = "time", values_to = "mean_sst" )
-
-
-
-#fix column names
-#names(sst_mean_region) <- sub('mean.', '', names(sst_mean_region))
-
-#pivot the data and round values, then use left_join() to add time values, year, mon, and fyear from the key table
-#monthly_region_sst <- pivot_longer(sst_mean_region, cols = 3:ncol(sst_mean_region),
-#                                   names_to = "LayerName", values_to = "MonthlyMeanSst") |>
-#  mutate(MonthlyMeanSst = round(MonthlyMeanSst, 1)) |>
-#  left_join(name_date_tbl, by = "LayerName")
 
 #remove financial years without a full set of data (usually just 1911, and sometimes the most recent fyear).
 removal_rows <- n3_sst_tbl |> 
@@ -250,11 +224,7 @@ removal_rows <- n3_sst_tbl |>
 
 #subtract from the main table, any rows that appear in the removal table
 monthly_region_sst <- n3_sst_tbl |> 
-  anti_join(removal_rows, by = "Fyear")# |> 
-  #st_as_sf()
-
-#clean up
-#rm(sst_mean_region, removal_rows)
+  anti_join(removal_rows, by = "Fyear")
 
 ```
 
@@ -432,9 +402,7 @@ Where:
 ```{r}
 #| label: load and use conditional formatting function
 
-#read in climate condition formatting function
-#source(here("functions/cond_form_climate.R"))
-
+#use a custom func from RcTools
 save_n3_table(
   df = monthly_per_wide,
   file_name = glue("{output_path}/sea-surface-temperature_monthly-percentiles"),
@@ -442,9 +410,6 @@ save_n3_table(
   target_rows = 1:nrow(monthly_per_wide),
   scheme = "Temperature"
 )
-
-#run function, noting to specify which colour system we want to use
-#cond_form_climate(monthly_per_wide, glue("{output_path}/sea-surface-temperature_monthly-percentiles"), indicator = "sea_surface_temperature")
 
 ```
 
@@ -537,10 +502,6 @@ for (i in n3_marine$Region){
        height = 7, width = 12)
 
 }
-
-#clean up
-rm(min_per, max_per, breaks, background, df, x, groups, transformer, target_region, 
-   target_data, col_palette)
 
 ```
 
@@ -651,66 +612,6 @@ ltm_30_mean <- st_apply(ltm_30_stack, c(1,2), mean, na.rm = TRUE)
 #subtract the ltm from the current to determine the anomaly
 anom_sst_map <- cy_sst_map - ltm_30_mean
 
-#crop each of the layers
-cy_sst_map_crop <- st_crop(cy_sst_map, n3_marine)
-anom_sst_map_crop <- st_crop(anom_sst_map, n3_marine)
-
-#cy_sst_map <- mean(subset(n3_sst, target_period$LayerName))
-
-#create an empty SpatRaster to store the 30-year long term mean data
-#ltm_30_stack <- rast()
-
-#for (i in 1991:2020) {
-  
-  #create a name based on iteration
-  #layer_name <- glue("fyear_{i-1}_{i}")
-
-  #select only the current financial year from the reference table
-  #target_period <- name_date_tbl |> filter(Fyear == i)
-
-  #return the index of each layer that shares a date with the target table
-  #layer_index <- as.vector(which(st_get_dimension_values(n3_sst, "time") %in% as.Date(target_period$LayerDate)))
-
-  #extract those layers and then create a mean of current fyear map
-  #cy_sst_map <- n3_sst[,,,layer_index] |> 
-  #  st_apply(c(1,2), mean, na.rm = TRUE)
-  
-  #create a subset of the name_date_tbl for the date range
-  #target_period <- name_date_tbl |> filter(Fyear == i)
-  
-  #Use subset to select layers and take the mean for the yearr
-  #raster_layer <- mean(subset(n3_sst, target_period$LayerName))
-  
-  #update layer name
-  #names(raster_layer) <- layer_name
-    
-  #put layers into a single stack
-  #ltm_30_stack <- c(ltm_30_stack, raster_layer)
-
-#}
-
-#create a ltm map
-#ltm_30_sst_map <- mean(ltm_30_stack)
-
-#put the two SpatRasters into one for next operation
-#anom_rast <- c(cy_sst_map, ltm_30_sst_map)
-
-#subtract ltm from cy mean to get an anomaly map
-#anom_sst_map <- lapp(anom_rast, fun = function(r1, r2){return(r1 - r2)})  
-
-#rename layer
-#names(anom_sst_map) <- "Sea-Surface-Temperature_Anomaly_(C)"
-
-#interpolate data to increase resolution and therefore accuracy
-#if (fac > 1) {
-#  cy_sst_map <- disagg(cy_sst_map, fac, "bilinear")
-#  anom_sst_map <- disagg(anom_sst_map, fac, "bilinear")
-#}
-
-#then mask again to get a precise border
-#cy_sst_n3_crop <- mask(cy_sst_map, vect(n3_marine))
-#anom_sst_n3_crop <- mask(anom_sst_map, vect(n3_marine))
-
 ```
 
 ### Calculate Legend Values
@@ -734,97 +635,14 @@ all_anom_layers <- purrr::map(seq(dim(n3_sst_annual)[[3]]), \(x) {n3_sst_annual[
 #stack all comparisons into a single stars object
 sst_all <- do.call(c, c(all_anom_layers, list(along = "time")))
 
-#max(sst_all)
-
-#extract the results into a simple table
-#all_anom_tbl <- bind_rows(map(all_anom_layers, as_tibble))
-
-#then retreive a min and max value
-#anom_min_val <- min(all_anom_tbl$cropped_sst_198501.nc, na.rm = TRUE)
-#anom_max_val <- max(all_anom_tbl$cropped_sst_198501.nc, na.rm = TRUE)
-
-
-#test <- as_tibble(all_anom_maps[[1]])
-
-  #subtract the ltm from the current to determine the anomaly
-  #anom_sst_map <- 
-
-
-#}
-
-#create an empty raster to store the output
-#all_anomalies <- rast()
-
-#for each fyear in the 30 year period, calculate the annual value, then compare it to the ltm value and save the anomalies for that year
-#for (i in 1991:2023){
-  
-  #create a name based on iteration
- # layer_name <- glue("fyear_{i-1}_{i}")
-  
-  #create a subset of the name_date_tbl for the date range
-  #target_period <- name_date_tbl |> filter(Fyear == i)
-  
-  #Use subset to select layers and sum into a single layer
-  #raster_layer <- mean(subset(n3_sst, target_period$LayerName))
-  
-  #update layer name
-  #names(raster_layer) <- layer_name
-
-  #put the two SpatRasters into one for next operation
-  #comparison_rast <- c(raster_layer, ltm_30_sst_map)
-  
-  #subtract ltm from target year mean to get an anomaly map
-  #comparison_rast_map <- lapp(comparison_rast, fun = function(r1, r2){return(r1 - r2)})
-  
-  #rename layer
-  #names(comparison_rast_map) <- glue("fyear_{i-1}_{i}")
-  
-  #stack all the comparisons together to be looked through later
-  #all_anomalies <- c(all_anomalies, comparison_rast_map)
-  
-#}
-
-```
-
-We also need to check if the anomaly for the current year exceeds the maximum anomaly recorded from within the 30-year climate normal. The easiest way to do this, is just to add the cy anomaly map to the full stack of anomaly maps, and if it just so happens to be the greatest (+ or -) then it will be selected.
-
-```{r}
-#| label: add cy anomaly to the stack
-
-#stack together
-#all_anomalies_n3_crop <- c(all_anomalies_n3_crop, anom_sst_n3_crop)
+#use the high res crop function to crop and increase resolution at the same time
+sst_all_crop <- nc_high_res_crop(sst_all, n3_marine, 5)
+cy_sst_map_crop <- nc_high_res_crop(cy_sst_map, n3_marine, 5)
+anom_sst_map_crop <- nc_high_res_crop(anom_sst_map, n3_marine, 5)
 
 ```
 
 We can then plot the current year, and current year anomaly, sst data at a region level and basin level.
-
-
-```{r}
-
-#interpolate data to increase resolution and therefore accuracy
-if (script_fac > 1) {
-
-  #create the new resolution object and warp, all in the same move as a custom func
-  dis_agg_fnc <- function(x){   
-    st_warp(x, st_as_stars(
-      st_bbox(x), 
-      dx = (1/script_fac) * st_dimensions(x)$x$delta, 
-      dy = (1/script_fac) * st_dimensions(x)$y$delta
-    ), method = "bilinear", use_gdal = TRUE)
-  }
-
-  #run the function
-  cy_sst_map_crop <- dis_agg_fnc(cy_sst_map_crop[,,,, drop = TRUE])
-  anom_sst_map_crop <- dis_agg_fnc(anom_sst_map_crop[,,,, drop = TRUE])
-  sst_all <- dis_agg_fnc(sst_all)
-
-  #then mask again to get a precise border
-  cy_sst_map_crop <- st_crop(cy_sst_map_crop, n3_marine)
-  anom_sst_map_crop <- st_crop(anom_sst_map_crop, n3_marine)
-  sst_all <- st_crop(sst_all, n3_marine)
-}
-
-```
 
 ```{r}
 #| label: plot cy and ltm temperature map
@@ -852,11 +670,6 @@ for (i in n3_marine$Region) {
   cy <- st_crop(cy_sst_map_crop, target_region)
   anom <- st_crop(anom_sst_map_crop, target_region)
   all_anoms <- st_crop(sst_all, target_region)
-
-  #mask to the specific region
-  #cy <- trim(mask(cy_sst_n3_crop, vect(target_region)))
-  #anom <- trim(mask(anom_sst_n3_crop, vect(target_region)))
-  #all_anoms_stack <- trim(mask(all_anomalies_n3_crop, vect(target_region)))
   
   #calculate the breaks for the cy legend based on the min and max for the actually cy data
   cy_break <- plyr::round_any(
@@ -891,7 +704,7 @@ for (i in n3_marine$Region) {
       tm_shape(region_basins) +
       tm_polygons(fill = "grey90", 
                   col = "black") +
-      tm_text("Place", 
+      tm_text("Basin", 
               xmod = -1.8, 
               ymod = 0.1, 
               size = 0.7,

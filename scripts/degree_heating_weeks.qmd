@@ -39,21 +39,24 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #| label: load packages
 
 #use pacman function to load and install (if required) all other packages
-pacman::p_load(tidyverse, glue, here, janitor, sf, tmap, exactextractr, terra, RColorBrewer, ggplot2)
+pacman::p_load(tidyverse, glue, here, janitor, sf, tmap, exactextractr, RColorBrewer, stars, ggplot2)
 
 #install/load the custom package
 #pak::pak("add-am/RcTools")
 library(RcTools)
 
 #define the target year
-current_fyear <- 2025
+script_fyear <- 2025
 
-#build the data path variable
+#build the data path and output path variables
 data_path <- here("data/dhw/")
+output_path <- here(glue("outputs/dhw/{script_fyear}/"))
 
 #and create some additional sub folders
 dir.create(glue("{data_path}/raw/"), recursive = TRUE)
 dir.create(glue("{data_path}/processed/"))
+dir.create(glue("{output_path}/plots/"), recursive = TRUE)
+dir.create(glue("{output_path}/maps/"))
 
 ```
 
@@ -71,11 +74,12 @@ The northern three boundaries are built using a custom function or reloaded from
 ``` {r}
 #| label: Load data
 
-#if the data is on file, load it, otherwise built it
-if (file.exists(glue("{data_path}/n3_region.gpkg"))){
-  n3_region <- st_read(glue("{data_path}/n3_region.gpkg"))
+#if the data is on file, load it, otherwise built it and save it for next time
+if (file.exists(here("data/n3_region.gpkg"))){
+  n3_region <- st_read(here("data/n3_region.gpkg"))
 } else {
   n3_region <- build_n3_region()
+  st_write(n3_region, here("data/n3_region.gpkg"))
 }
 
 ```
@@ -105,23 +109,20 @@ n3_basins <- n3_region |>
 reefs <- get(data("gbr_feat", package = "gisaimsr")) |> 
   name_cleaning() |> 
   filter(FeatName == "Reef") |> 
-  st_transform(proj_crs)
-
-#create a point for Townsville
-tsv <- st_as_sf(data.frame(Place = "Townsville", x = "-19.2590", y = "146.8169"), coords = c("y", "x"), crs = proj_crs)
+  st_transform("EPSG:7855")
 
 ```
 
 ::: {.callout-note}
 ## WT Request
-A special request from the WT team is to use their marine boundary, rather than the marine boundary as defined by the NRM groups. Thus below we need to replace to NRM WT boundary with the custom version.
+A special request from the WT team is to use their marine boundary, rather than the marine boundary as defined by the NRM groups. Thus below we need to replace to NRM WT boundary with the custom version. Note that this outline was provided by the WT team and has no online equivalent.
 :::
 
 ```{r}
 #| label: replace WT outline with custom
 #
 #read in the custom WT outline and edit to match the main dataset
-wt_custom <- st_read(here("data/99. archive/wt_full_marine.gpkg")) |> 
+wt_custom <- st_read(here("data/historical_wt_boundary.gpkg")) |> 
   name_cleaning() |> 
   select(Name) |> 
   rename(Region = Name)
@@ -151,17 +152,27 @@ n3_region <- n3_region
 
 #download, save, crop, and build the data
 n3_dhw <- dhw_extract(full_file_loc, cropped_file_loc, n3_region)
+
+#update the crs of the data to match the n3 region geometry
+n3_dhw <- st_warp(n3_dhw, crs = "EPSG:7855")
     
 ```
 
 ### Edit Data
 
-Although we download all DHW data from 1986 to present, currently we are only focused on the most recent 5 years of data. There is no long-term analysis of the data (yet). Below we filter by year to only get the most recent 5.
+Although we download all DHW data from 1986 to present, currently we are only focused on the most recent 5 years of data. There is no long-term analysis of the data (yet). Below we filter by year to only get the most recent 5 years.
 
 ```{r}
 #| label: subset data
 
-n3_dhw_5y <- n3_dhw[[time(n3_dhw) > as_date(glue("{current_fyear}-01-01")) %m-% months(48)]]
+#find the index for the layer that matches the target year
+target_layer <- which(paste0(script_fyear, "-06-01") == st_get_dimension_values(n3_dhw, "time"))
+
+#extract that layer plus the four previous ones
+n3_dhw_5y <- n3_dhw[,,,(target_layer-4):target_layer]
+
+#use the high res crop function to crop and increase resolution at the same time
+n3_dhw_5y <- nc_high_res_crop(n3_dhw_5y, n3_marine, 5)
 
 ```
 
@@ -182,26 +193,17 @@ NOAA have since updated the scale used for DHW as well, it is pending if we shou
 ```{r}
 #| label: prepare data for mapping first round
 
-#if the fac is not 1, interpolate the data to increase resolution
-if (fac > 1) {
-  n3_dhw_5y <- disagg(n3_dhw_5y, fac, "bilinear")
-}
+#extract the underlying array
+vals <- n3_dhw_5y[[1]]
 
-#get the raster as a tbl
-temp <- as_tibble(terra::as.data.frame(n3_dhw_5y, na.rm = F), .name_repair = "unique")
+#put data into bins
+vals_binned <- array(
+  findInterval(vals, c(-Inf, 2, 4, 6, 8, Inf), rightmost.closed = TRUE), 
+  dim = dim(vals), 
+  dimnames = dimnames(vals))
 
-#update all tbl values into 5 custom bins
-temp <- temp |> mutate(across(everything(), ~ case_when(. <= 2 ~ 1,
-                                                        . <= 4 ~ 2,
-                                                        . <= 6 ~ 3,
-                                                        . <= 8 ~ 4,
-                                                        . > 8 ~ 5)))
-
-#replace the original values with the binned values
-n3_dhw_5y <- setValues(n3_dhw_5y, as.matrix(temp))
-
-#clean up
-rm(temp)
+#put the binned values back into the netcdf
+n3_dhw_5y[[1]] <- vals_binned
 
 ```
 
@@ -243,8 +245,8 @@ for (i in n3_marine_names) {
   #get the associated basins
   basins <- n3_basins |> filter(Region == i)
   
-  #then mask again to the specific region
-  single_year_gbr <- trim(mask(n3_dhw_5y[[5]], vect(region_basins)))
+  #crop to the specific region and take a single year of data
+  single_year_gbr <- st_crop(n3_dhw_5y[,,,5], region_basins)
   
   #mask reefs to the region as well
   target_reefs <- st_intersection(reefs, region_basins)
@@ -264,13 +266,7 @@ for (i in n3_marine_names) {
     tm_shape(basins) +
     tm_polygons(fill = "grey90", 
                 col = "black") +
-    tm_shape(tsv) +
-    tm_symbols(size = 0.3, 
-               fill = "white", 
-               col = "black", 
-               lwd = 2, 
-               shape = 23) +
-    tm_text("Place", 
+    tm_text("Basin", 
             xmod = -1.8, 
             ymod = 0.1, 
             size = 0.7,
@@ -329,7 +325,7 @@ for (i in n3_marine_names) {
   basins <- n3_basins |> filter(Region == i)
 
   #mask to just the region (keep all years)
-  all_year_region <- trim(mask(n3_dhw_5y, vect(region_basins)))
+  all_year_region <- st_crop(n3_dhw_5y, region_basins)
     
   #plot
   facet_map <- tm_shape(all_year_region) +
@@ -341,7 +337,7 @@ for (i in n3_marine_names) {
     tm_shape(qld) +
     tm_polygons(fill = "grey80",
                 col = "black") +
-    tm_shape(region_basins, is.main = T) +
+    tm_shape(region_basins, is.main = TRUE) +
     tm_borders(col = "black") +
     tm_shape(basins) +
     tm_polygons(fill = "grey90", 
@@ -349,14 +345,14 @@ for (i in n3_marine_names) {
     tm_shape(reefs) +
     tm_borders(fill = "grey60", 
                fill_alpha = 0.6) +
-    tm_layout(panel.labels = year(time(n3_dhw_5y))) +
+    tm_layout(panel.labels = year(st_get_dimension_values(n3_dhw_5y, "time"))) +
     tm_facets_hstack()
 
   #edit variable name for better save path
   i_lower <- tolower(gsub(" ", "-", i))
  
   #save the map as a png
-  tmap_save(facet_map, filename = glue("{output_path}/maps/{i_lower}_dhw_fyear-{current_fyear}-to-{current_fyear-4}.png"))
+  tmap_save(facet_map, filename = glue("{output_path}/maps/{i_lower}_dhw_fyear-{script_fyear}-to-{script_fyear-4}.png"))
   
 }
 
@@ -387,14 +383,14 @@ process_region_year <- function(region_name, year_index) {
     filter(Region == region_name)
   
   #mask to the specific region and year
-  single_year_region <- trim(mask(n3_dhw_5y[[year_index]], vect(region_basins)))
+  single_year_region <- st_crop(n3_dhw_5y[,,,year_index], region_basins)
   
   #extract the values for the region and calculate quantiles and create a data frame
-  quantiles <- quantile(values(single_year_region), na.rm = TRUE)
+  quantiles <- quantile(single_year_region[[1]], na.rm = TRUE)
   
   #convert into a dataframe, this is also the output
   data.frame(Region = region_name,
-             Year = str_split(time(n3_dhw_5y)[year_index], "-")[[1]][1],
+             Year = str_split(st_get_dimension_values(n3_dhw_5y, "time")[year_index], "-")[[1]][1],
              Min = quantiles[1],
              Per25 = quantiles[2],
              Mean = quantiles[3],
@@ -403,15 +399,19 @@ process_region_year <- function(region_name, year_index) {
              row.names = NULL)
 }
 
-# create a data frame that has pairs for each region and year combination
+#create a data frame that has pairs for each region and year combination
 region_year_pairs <- expand.grid(Region = n3_marine_names, Year = 1:5)
 
 #run the custom function over every pair in the region year dataset, then bind the outputs together
-summary_statistics <- map2(region_year_pairs$Region, region_year_pairs$Year, 
-                           process_region_year) |> bind_rows()
+summary_statistics <- map2(region_year_pairs$Region, region_year_pairs$Year, process_region_year) |> bind_rows()
 
 #save the table
 write_csv(summary_statistics, glue("{output_path}/dhw_summary.csv"))
+
+```
+
+```{r}
+
 
 ```
 

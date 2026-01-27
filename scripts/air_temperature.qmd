@@ -30,31 +30,23 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #use pacman function to load and install (if required) packages
 pacman::p_load(tidyverse, glue, here, janitor, sf, tmap, exactextractr, terra, RColorBrewer, ggplot2, stars)
 
-#install custom package if needed
+#install/load the custom RcTools package
 pak::pak("add-am/RcTools")
-
-#load package
 library(RcTools)
-
-#turn off spherical geometry
-sf_use_s2(FALSE)
-
-#turn off scientific notation
-options(scipen = 999)
 
 #define the script crs and target year
 script_crs <- "EPSG:7855"
 script_year <- 2025
 
-#define data source path
+#build the data path and output path variables
 data_path <- here("data/air_temperature/")
+output_path <- here(glue("outputs/air_temperature/{script_year}/"))
 
-#define output path
-output_path <- here(glue("outputs/air_temperature/{script_year}"))
-
-#create some folders for saving plots and maps
-dir.create(glue("{output_path}/maps/"), recursive = TRUE)
+#and create some additional sub folders
+dir.create(glue("{data_path}/raw/"), recursive = TRUE)
+dir.create(glue("{data_path}/processed/"))
 dir.create(glue("{output_path}/plots/"), recursive = TRUE)
+dir.create(glue("{output_path}/maps/"))
 
 ```
 
@@ -72,21 +64,17 @@ Spatial data for the northern three regions should be readily available in the r
 ``` {r}
 #| label: Load data
 
-#check if object exists on file
-if (any(str_detect(list.files("data/"), "n3_region.gpkg"))){
-
-  n3_region <- st_read("data/n3_region.gpkg")
-
+#if the data is on file, load it, otherwise built it and save it for next time
+if (file.exists(here("data/n3_region.gpkg"))){
+  n3_region <- st_read(here("data/n3_region.gpkg"))
 } else {
-
   n3_region <- build_n3_region()
-
-  st_write(n3_region, "data/n3_region.gpkg")
-
+  st_write(n3_region, here("data/n3_region.gpkg"))
 }
 
-#read in the custom function to clean column names into our specific style
-#source(here("functions/name_cleaning.R"))
+```
+
+```{r}
 
 #trim down the n3 dataset
 n3_trimmed <- n3_region |> 
@@ -105,11 +93,6 @@ n3_sub_basins <- n3_trimmed |> group_by(Region, Basin, SubBasin) |>
 #create a point for Townsville
 tsv <- st_as_sf(data.frame(Place = "Townsville", x = "-19.2590", y = "146.8169"), coords = c("y", "x"), crs = script_crs)
 
-#load qld data
-data("qld") 
-
-qld <- st_transform(qld, "EPSG:7855")
-
 ```
 
 ## Air Temperature Data
@@ -120,6 +103,30 @@ Note there is a buffer region used on the raster cells, this is to ensure that c
 
 ```{r}
 #| label: load temp data and check if needed to be cut
+
+#create a path to the raw min and max temperature folders
+min_tmp <- glue("{data_path}/raw/tmin2")
+min_tmp <- glue("{data_path}/raw/tmax2")
+
+#create a path to the cropped min and map temperature folders
+min_tmp <- glue("{data_path}/processed/tmin2")
+min_tmp <- glue("{data_path}/processed/tmax2")
+
+#create a path to where the final dataset should be saved
+final <- glue("Unsure atm")
+
+#---- inside func now?
+
+#create a list of all min and max files
+file_list_min <- list.files(min_tmp, full.names = TRUE, recursive = TRUE)
+file_list_max <- list.files(max_tmp, full.names = TRUE, recursive = TRUE)
+
+#some kind of safety check for extension type
+#..
+
+#read in all data
+at_min <- stars::read_stars(file_list_min)
+at_max <- stars::read_stars(file_list_max)
 
 #create a path to the finished dataset
 path1 <- glue("{data_path}/n3_tmean_temperature.nc")
