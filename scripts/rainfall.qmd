@@ -26,10 +26,10 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #| label: load packages
 
 #use pacman function to load and install (if required) all other packages
-pacman::p_load(dplyr, glue, here, sf, tmap, exactextractr, terra, RColorBrewer, ggplot2, openxlsx2, stars)
+pacman::p_load(dplyr, glue, here, sf, tmap, RColorBrewer, ggplot2, openxlsx2, stars, lubridate)
 
 #install/load the custom RcTools package
-pak::pak("add-am/RcTools")
+#pak::pak("add-am/RcTools")
 library(RcTools)
 
 #define the script crs and target year
@@ -41,8 +41,6 @@ data_path <- here("data/rainfall/")
 output_path <- here(glue("outputs/rainfall/{script_year}/"))
 
 #and create some additional sub folders
-dir.create(glue("{data_path}/raw/"), recursive = TRUE)
-dir.create(glue("{data_path}/processed/"))
 dir.create(glue("{output_path}/plots/"), recursive = TRUE)
 dir.create(glue("{output_path}/maps/"))
 
@@ -70,7 +68,6 @@ if (file.exists(here("data/n3_region.gpkg"))){
   st_write(n3_region, here("data/n3_region.gpkg"))
 }
 
-
 ```
 
 Once loaded, the spatial data is edited for ease of use later on.
@@ -83,21 +80,19 @@ n3_trimmed <- n3_region |>
   rename(Basin = BasinOrZone, 
          SubBasin = SubBasinOrSubZone)
 
-#get basins and sub basins separately
+#get basins 
 n3_basins <- n3_trimmed |> 
   group_by(Region, Basin) |> 
   summarise(geom = st_union(geom)) |> 
   ungroup() |> 
   st_cast()
 
+#and sub basins separately
 n3_sub_basins <- n3_trimmed |> 
   group_by(Region, Basin, SubBasin) |> 
   summarise(geom = st_union(geom)) |> 
   ungroup() |> 
   st_cast()
-
-#create a point for Townsville
-tsv <- st_as_sf(data.frame(Place = "Townsville", x = "-19.2590", y = "146.8169"), coords = c("y", "x"), crs = proj_crs)
 
 ```
 
@@ -113,10 +108,10 @@ data_name <- glue("{data_path}/n3_rainfall.nc")
 
 #if the data is on file, load it, otherwise built it and save it for next time
 if (file.exists(data_name)){
-  rain_data <- st_read(data_name)
+  n3_rain <- read_stars(data_name)
 } else {
-  rain_data <- rainfall_extract(n3_region)
-  write_stars(rain_data, data_name)
+  n3_rain <- rainfall_extract(n3_region)
+  write_mdim(n3_rain, data_name)
 }
 
 ```
@@ -141,10 +136,12 @@ To assist in parsing this data a "key table" is created that contains all layer 
 #create a tibble of layer names and dates
 name_date_tbl <- tibble("LayerName" = names(n3_rain), "LayerDate" = time(n3_rain))
 
-#add extra info (fyear, year, month, etc.)
-name_date_tbl <- name_date_tbl |> mutate(Year = year(LayerDate),
-                                         Month = month(LayerDate, label = T),
-                                         Fyear = case_when(month(LayerDate) > 6 ~ Year + 1, T ~ Year))
+#include extra info (fyear, year, month, etc.)
+name_date_tbl <- name_date_tbl |> 
+  mutate(
+    Year = year(LayerDate),
+    Month = month(LayerDate, label = T),
+    Fyear = case_when(month(LayerDate) > 6 ~ Year + 1, T ~ Year))
 
 ```
 
@@ -164,7 +161,7 @@ The first analysis we will do is to create a summary table that provides an over
 
 First up is mean the exact means we are going to calculate are as follows:
 
- - Monthly Mean: This is the SPATIAL mean of all the rainfall cells across the basin. We will calculate this using the exact_extract(). For example, if there were 3 rainfall cells in the Ross Basin for the date of 01/01/2020, that had the values 3mm, 4mm, and 5mm. Then the monthly mean value for the Ross Basin for the date of 01/01/2020 would be 4mm.
+ - Monthly Mean: This is the SPATIAL mean of all the rainfall cells across the basin. For example, if there were 3 rainfall cells in the Ross Basin for the date of 01/01/2020, that had the values 3mm, 4mm, and 5mm. Then the monthly mean value for the Ross Basin for the date of 01/01/2020 would be 4mm.
  - Annual Mean: This is calculated as the SUM of the monthly mean values for each basin. However, because it is the sum of the SPATIAL mean monthly values, we will also call it a mean - as it is the mean of the total annual rainfall values experienced across the entire basin.
  - Long-Term Mean (LTM): To understand if the current year had lots, or not much, rainfall, we need to compare it against something, the LTM is what we compare it against. The LTM is calculated by taking the mean of the annual mean values for each basin from a 30-year block of data known as a climate normal (more on this in the LTM section below).
  
@@ -178,7 +175,7 @@ To get data from we need to specify the layers we are interested in. We use the 
 #| label: calculate monthly mean
 
 #increase cache size
-terra::gdalCache(1400)
+#terra::gdalCache(1400)
 
 #get mean, min and max from all layers
 rain_mean_basin <- tibble(exact_extract(n3_rain, n3_basins, fun = "mean", append_cols = T))
@@ -972,12 +969,6 @@ for (i in unique(n3_basins$Region)) {
       tm_text("Basin", 
               size = 0.6, 
               options = opt_tm_text(shadow = T)) +
-      tm_shape(tsv) +
-      tm_symbols(size = 0.3, 
-                 fill = "white", 
-                 col = "black", 
-                 lwd = 2, 
-                 shape = 23) +
       tm_text("Place", 
               xmod = 1.8, 
               ymod = 0.1, 
@@ -1023,12 +1014,6 @@ for (i in unique(n3_basins$Region)) {
         tm_text("Basin", 
                 size = 0.6, 
                 options = opt_tm_text(shadow = T)) +
-        tm_shape(tsv) +
-        tm_symbols(size = 0.3, 
-                   fill = "white", 
-                   col = "black", 
-                   lwd = 2, 
-                   shape = 23) +
         tm_text("Place",
                 xmod = 1.8, 
                 ymod = 0.1, 
@@ -1098,6 +1083,11 @@ for (i in unique(n3_basins$Basin)) {
 
   tmap_save(map, filename = glue("{output_path}/maps/{i}-basin_rainfall_facet-map.png"))
 }
+
+```
+
+```{r}
+
 
 ```
 
