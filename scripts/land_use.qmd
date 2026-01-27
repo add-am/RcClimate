@@ -27,21 +27,28 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #| label: load packages
 
 #use pacman function to load and install (if required) all other packages
-pacman::p_load(tidyverse, glue, here, janitor, sf, tmap, exactextractr, terra, RColorBrewer, ggplot2)
+pacman::p_load(dplyr, tidyr, readr, purrr, stars, glue, here, sf, tmap, RColorBrewer, ggplot2, ncdf4, lubridate)
 
-#set project variables: crs factor and current_fyear
-proj_crs <- params$project_crs
-fac <- params$disagg_factor
-current_fyear <- params$target_fyear
+#install/load the custom RcTools package
+#pak::pak("add-am/RcTools")
+library(RcTools)
 
-#load in the custom function used to create the read and write folders for the script
-source(here("functions/script_setup.R"))
+#define the script crs and target year
+script_crs <- "EPSG:7855"
+script_fyear <- 2025
+script_fac <- 5
 
-#run the function to create the folders and paths
-script_setup()
+sf_use_s2(FALSE)
 
-#read in the custom function to clean column names into our specific style
-source(here("functions/name_cleaning.R"))
+#build the data path and output path variables
+data_path <- here("data/land_use/")
+output_path <- here(glue("outputs/land_use/{script_fyear}/"))
+
+#and create some additional sub folders
+dir.create(glue("{data_path}/raw/"), recursive = TRUE)
+dir.create(glue("{data_path}/processed/"))
+dir.create(glue("{output_path}/plots/"), recursive = TRUE)
+dir.create(glue("{output_path}/maps/"))
 
 ```
 
@@ -53,7 +60,22 @@ Now the script is set up we need to load in all of the required datasets. This w
 
 ## Spatial Data
 
-Spatial data for the northern three regions should be readily available in the repo, the dataset is created by the n3_region-builder.qmd script in the repo that should be the first script run for new users. If the dataset is not available refer back to the README document in the GitHub repo. The other parts of spatial data here should go off without a hitch if the region-builder script has been run.
+The northern three boundaries are built using a custom function or reloaded from file.
+
+``` {r}
+#| label: Load data
+
+#if the data is on file, load it, otherwise built it and save it for next time
+if (file.exists(here("data/n3_region.gpkg"))){
+  n3_region <- st_read(here("data/n3_region.gpkg"))
+} else {
+  n3_region <- build_n3_region()
+  st_write(n3_region, here("data/n3_region.gpkg"))
+}
+
+```
+
+The data is then filtered for ease of use later.
 
 ```{r}
 #| label: load the n3 region
@@ -77,12 +99,22 @@ If for some reason you find that the edited output is not what you want, or that
 For example, if new datasets are published to QSpatial you will need to rerun the original merge and crop step.
 :::
 
-This first code chuck handles exotic geometries present in the data (this seems to be the only type of data across the whole repo that requires this step). The code:
+All land use data is downloaded from [QSpatial](https://qldspatial.information.qld.gov.au/catalogue/custom/index.page): 
+
+Search for:
+"Land use mapping - 1999 to 2016 - Burdekin NRM".
+"Land use mapping - 2021 - Great Barrier Reef NRM regions".
+"Land use mapping - 1999 to 2015 - Wet Tropics NRM region".
+"Land use mapping - 1999 to 2016 - Mackay Whitsunday NRM".
+Download as is, there are no formatting options.
+
+
+This first code chuck handles exotic geometries present in the data. The code:
 - Opens each file and seperates the exotic geometries from the standard geometries.
-- Saves the exotics to their own (temporary) file and edits this exotics file using gdalUtils.
+- Saves the exotics to their own (temporary) file and edits this exotics file using gdalUtils outside of R.
 - Reads the edited exotics file back into R and combines it with the standard geometries.
 
-Exotic geometries and those that are a bit rarer (e.g. MULTISURFACE, CURVELINEAR), whereas standard geometries are the ones everyone should be familiar with (POLYGON, LINE, POINT).
+Exotic geometries and those that are a bit rarer (e.g. MULTISURFACE, CURVLINEAR), whereas standard geometries are the ones everyone should be familiar with (POLYGON, LINE, POINT).
 
 ```{r}
 #| label: data processing
