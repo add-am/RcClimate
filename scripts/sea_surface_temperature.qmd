@@ -193,7 +193,7 @@ Each of these components require a bit of work.
 
 First up is mean the exact means we are going to calculate are as follows:
 
- - Monthly Mean: This is the SPATIAL mean of all the sea surface temperature cells across the region We will calculate this using the exact_extract(). For example, if there were 3 temperature cells in the Dry Tropics Marine Region for the date of 01/01/2020, that had the values 25C, 26C, and 27C. Then the monthly mean value for the Dry Tropics Marine Region for the date of 01/01/2020 would be 26C.
+ - Monthly Mean: This is the SPATIAL mean of all the sea surface temperature cells across the region. For example, if there were 3 temperature cells in the Dry Tropics Marine Region for the date of 01/01/2020, that had the values 25C, 26C, and 27C. Then the monthly mean value for the Dry Tropics Marine Region for the date of 01/01/2020 would be 26C.
  - Annual Mean: This is calculated as the MEAN of the monthly mean values for each region. Note, because it is the mean of the SPATIAL mean monthly values, its both the mean of the month AND the spatial mean of all temperatures experienced across the entire region.
  - Long-Term Mean (LTM): To understand if the current year had higher, or low, temperatures, we need to compare it against something. The LTM is what we compare it against. The LTM is calculated by taking the mean of the annual mean values for each basin from a 30-year block of data known as a climate normal (more on this in the LTM section below).
  
