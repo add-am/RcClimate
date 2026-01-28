@@ -138,7 +138,7 @@ cropped_file_loc <- glue("{data_path}/processed/")
 n3_region <- n3_region
 
 #download, save, crop, and build the data
-n3_sst <- sst_extract(full_file_loc, cropped_file_loc, n3_region)
+n3_sst <- extract_sst(full_file_loc, cropped_file_loc, n3_region)
 
 #update the crs of the data to match the n3 region geometry
 n3_sst <- st_warp(n3_sst, crs = "EPSG:7855")
