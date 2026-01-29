@@ -33,8 +33,11 @@ pacman::p_load(dplyr, glue, here, sf, tmap, RColorBrewer, ggplot2, openxlsx2, st
 library(RcTools)
 
 #define the script crs and target year
-script_crs <- "EPSG:7855"
+#script_crs <- "EPSG:7844"
 script_fyear <- 2025
+
+#turn of spherical geometry
+sf_use_s2(FALSE)
 
 #build the data path and output path variables
 data_path <- here("data/rainfall/")
@@ -67,6 +70,9 @@ if (file.exists(here("data/n3_region.gpkg"))){
   n3_region <- build_n3_region()
   st_write(n3_region, here("data/n3_region.gpkg"))
 }
+
+#transform the data to a crs that the rainfall data needs
+n3_region <- st_transform(n3_region, "EPSG:7844")
 
 ```
 
@@ -850,9 +856,9 @@ all_anom_layers <- purrr::map(seq(dim(n3_rain_annual)[[3]]), \(x) {n3_rain_annua
 rain_all <- do.call(c, c(all_anom_layers, list(along = "time")))
 
 #use the high res crop function to crop and increase resolution at the same time
-rain_all_crop <- nc_high_res_crop(rain_all, n3_basins, 5)
-cy_rain_map_crop <- nc_high_res_crop(cy_rain_map, n3_basins, 5)
-anom_rain_map_crop <- nc_high_res_crop(anom_rain_map, n3_basins, 5)
+rain_all_crop <- nc_high_res_crop(rain_all, n3_basins, 6)
+cy_rain_map_crop <- nc_high_res_crop(cy_rain_map, n3_basins, 6)
+anom_rain_map_crop <- nc_high_res_crop(anom_rain_map, n3_basins, 6)
 
 
 ```
