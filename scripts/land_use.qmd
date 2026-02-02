@@ -27,7 +27,7 @@ This script requires multiple core spatial packages, each of which is loaded bel
 #| label: load packages
 
 #use pacman function to load and install (if required) all other packages
-pacman::p_load(dplyr, tidyr, readr, purrr, stars, glue, here, sf, tmap, RColorBrewer, ggplot2, ncdf4, lubridate)
+pacman::p_load(dplyr, tidyr, readr, purrr, stars, glue, here, sf, tmap, RColorBrewer, ggplot2, stringr, lubridate)
 
 #install/load the custom RcTools package
 #pak::pak("add-am/RcTools")
@@ -81,7 +81,7 @@ The data is then filtered for ease of use later.
 #| label: load the n3 region
 
 #select only the land components of the n3 region dataset
-n3_land <- n3_region |> 
+n3_sub_basins <- n3_region |> 
   filter(Environment != "Marine") |> 
   group_by(Region, BasinOrZone, SubBasinOrSubZone) |> 
   summarise(geometry = st_union(geom)) |> 
@@ -101,113 +101,38 @@ For example, if new datasets are published to QSpatial you will need to rerun th
 
 All land use data is downloaded from [QSpatial](https://qldspatial.information.qld.gov.au/catalogue/custom/index.page): 
 
-Search for:
-"Land use mapping - 1999 to 2016 - Burdekin NRM".
-"Land use mapping - 2021 - Great Barrier Reef NRM regions".
-"Land use mapping - 1999 to 2015 - Wet Tropics NRM region".
-"Land use mapping - 1999 to 2016 - Mackay Whitsunday NRM".
-Download as is, there are no formatting options.
+ - Search for:
+    - "Land use mapping - 1999 to 2016 - Burdekin NRM".
+    - "Land use mapping - 1999 to 2015 - Wet Tropics NRM region".
+    - "Land use mapping - 1999 to 2016 - Mackay Whitsunday NRM".
+    - "Land use mapping - 2021 - Great Barrier Reef NRM regions".
+ - Download as is, there are no formatting options.
+ - Once downloaded, for the **Burdekin, Wet Tropics, and GBR** datasets, extract the entire **.gdb folder** and rename each .gdb folder to the following:
+    - "dt_land_use.gdb"
+    - "wt_land_use.gdb"
+    - "qld_land_use.gdb"
+ - For the **Mackay Whitsunday NRM***, extract the **.gpkg** file and rename the file to "mwi_land_use.gpkg".
 
-
-This first code chuck handles exotic geometries present in the data. The code:
-- Opens each file and seperates the exotic geometries from the standard geometries.
-- Saves the exotics to their own (temporary) file and edits this exotics file using gdalUtils outside of R.
-- Reads the edited exotics file back into R and combines it with the standard geometries.
-
-Exotic geometries and those that are a bit rarer (e.g. MULTISURFACE, CURVLINEAR), whereas standard geometries are the ones everyone should be familiar with (POLYGON, LINE, POINT).
-
-```{r}
-#| label: data processing
-#| output: false
-
-if (file.exists(glue("{data_path}/processed/n3_land_use_clean.gpkg"))) {#if the full version exists
-  
-  #open the full version
-  n3_land_use_clean <- st_read(glue("{data_path}/processed/n3_land_use_clean.gpkg")) |>  
-    name_cleaning()
-    
-} else {#otherwise
-  
-  #initialize an empty df to store the output
-  n3_land_use_clean <- data.frame()
-  
-  #get all gpkg files with years in name (ignores the original mwi file).
-  file_names <- list.files(glue("{data_path}/raw/"), pattern = ".[[:digit:]]\\.gpkg") 
-  
-  for (i in 1:length(file_names)){#for each of the files in the list
-    
-    #pull the year from the file name
-    year <- str_extract(file_names[i], "1999|2009|2015|2016|2021")
-    
-    #read in each file 
-    temp_sf <- st_read(glue("{data_path}/raw/{file_names[i]}")) |> 
-      select(matches("Primary|Secondary|Tertiary")) |> 
-      rename_with(~str_remove_all(., "[0-9]|_"), matches("Primary|Secondary|Tertiary")) |> 
-      mutate(Year = year)
-    
-    #and separate the data into "standard" geometries - polygons, and non-standard geometries - e.g. multisurfaces
-    standard_geoms <- temp_sf |> filter(grepl("POLYGON", st_geometry_type(geom))) |> st_make_valid()
-    non_standard_geoms <- temp_sf |> filter(grepl("MULTISURFACE", st_geometry_type(geom)))
-    
-    #save non-standard geoms to be edited
-    st_write(non_standard_geoms, glue("{data_path}/temporary_storage.gpkg"), delete_dsn = T)
-    
-    #use the gdalUtilies to open edit and save the file (it auto saves as a folder containing a shapefile)
-    gdalUtilities::ogr2ogr(glue("{data_path}/temporary_storage.gpkg"), glue("{data_path}/temporary_storage"), 
-                           explodecollections = T, nlt = 'CONVERT_TO_LINEAR', overwrite = T)
-    
-    #read back in the edited file
-    fixed_geoms <- st_read(glue("{data_path}/temporary_storage/temporary_storage.shp")) |> 
-      rename(geom = geometry) |> st_make_valid()
-    
-    #join the fixed data onto the standard data
-    temp_sf <- rbind(standard_geoms, fixed_geoms)
-    
-    #join the dataset to the main dataset
-    n3_land_use_clean <- rbind(n3_land_use_clean, temp_sf)
-    
-  }
-  
-  #clean up data
-  rm(file_names, fixed_geoms, standard_geoms, non_standard_geoms, temp_sf, year)
-  unlink(glue("{data_path}/temporary_storage/"), recursive = T)
-  unlink(glue("{data_path}/temporary_storage.gpkg"))
-}
- 
-```
-
-After all the exotic geometries have been taken care of, the newly combined data needs to restricted to the N3 region to improve processing time, and categories into the land use types that we are interested in. Land use data is broken down into land use types at multiple levels (primary, secondary and tertiary). Primary is the broadest level, and tertiary is the most precise level. 
-
-Throughout the life of the partnership the opinions and requirements about the different land use types has changed and evolved. Given this, we will first save a "clean" version of the dataset - where no changes or groupings have been made regarding landuse types, and the only modification is the spatial restriction to the N3 region.
+ A custom function has then been written to handle the extraction and refining of each of these datasets into a single object.
 
 ```{r}
-#| label: data processing step 2
 
-if (file.exists(glue("{data_path}/processed/n3_land_use_clean.gpkg"))) {#if the edited version exists
-  
-  #do nothing because the below edits have already occurred.
-  
-} else {#otherwise 
-  
-  #add region, basin, sub basin context, then remove small amounts of overlap for dt and wt
-  n3_land_use_clean <- st_intersection(n3_land_use_clean, n3_land) |> 
-    filter(!Region %in% c("Dry Tropics", "Burdekin") | Year != "2015",
-           Region != "Wet Tropics" | Year != "2016")
-  
-  #make sure all entries are fully lower case - helps us filter
-  n3_land_use_clean <- n3_land_use_clean |> 
-    mutate(across(matches("Primary|Secondary|Tertiary"), str_to_lower))
-  
-  #save the output
-  st_write(n3_land_use_clean, glue("{data_path}/processed/n3_land_use_clean.gpkg"), delete_layer = T)
-  
-}
+#build path to the raw data
+raw_data_path <- glue("{data_path}/raw/")
+
+#build path to where cropped datasets should be saved
+cropped_data_path <- glue("{data_path}/processed/")
+
+#run custom function
+n3_land <- extract_land_use(raw_data_path, cropped_data_path, n3_sub_basins)
+
+#names need to be made lowercase for simplicity later
+n3_land <- n3_land |> 
+  mutate(across(where(is.character), tolower))
 
 ```
 
-Following this, we will combine the dataset into what is currently accepted as the broadest level of classification. Noting that in the future, or for side projects, we can simply revert to the "clean" version rather than having to go completely back to square one.
-
-Generally we are not concerned with the difference between for example; "National Park" and "Natural Feature Protection" (a tertiary level separation). Therefore we will only breakdown and report on land use at a custom mix of the primary and secondary land use type levels. These levels are as follows:
+Once the main dataset has been made we can group the dataset into what is currently accepted as the broadest level of classification as these are the classifications used in the Land Use analysis. This is because, generally we are not concerned with the difference between for example; "National Park" and "Natural Feature Protection" (a tertiary level separation). Therefore we will only breakdown and report on land use at a custom mix of the primary and secondary land use type levels. These levels are as follows:
 
  - "Conservation"
  - "Dryland Agriculture"
@@ -218,39 +143,26 @@ Generally we are not concerned with the difference between for example; "Nationa
  - "Urban/Intensive"
  - "Water"
 
-For information on what each of these classifications encompasses refer to the README for links to additional information.
-
 ```{r}
 #| label: data processing step 3
 
-if (file.exists(glue("{data_path}/processed/n3_land_use_grouped.gpkg"))) {#if the edited version exists
-  
-  #open the grouped version
-  n3_land_use_grouped <- st_read(glue("{data_path}/processed/n3_land_use_grouped.gpkg")) |>  
-    name_cleaning()
-  
-} else {#otherwise 
-
-  #edit entries to create groupings we want
-  n3_land_use_grouped <- n3_land_use_clean |> 
-    select(-Tertiary) |> 
-    mutate(Landuse = case_when(str_detect(Primary, "water") ~ "water",
-                               str_detect(Primary, "conservation") ~ "conservation",
-                               str_detect(Primary, "irrigated") ~ "irrigated agriculture",
-                               str_detect(Primary, "dryland") ~ "dryland agriculture",
-                               str_detect(Primary, "relatively natural") ~ "grazing",
-                               str_detect(Primary, "intensive") ~ "urban/intensive",
-                               T ~ Secondary)) |> 
-    mutate(Landuse = case_when(str_detect(Secondary, "grazing") ~ "grazing", 
-                               str_detect(Secondary, "forest") ~ "forestry",
-                               str_detect(Secondary, "mining") ~ "mining", 
-                               T ~ Landuse)) |> 
-    select(-c(Primary, Secondary))
-  
-  #save the output
-  st_write(n3_land_use_grouped, glue("{data_path}/processed/n3_land_use_grouped.gpkg"), delete_layer = T)
-  
-}
+#aggregate data
+n3_land <- n3_land |> 
+  select(-Tertiary) |> 
+  mutate(across(where(is.character), tolower)) |> 
+  mutate(Landuse = case_when(
+    str_detect(Primary, "water") ~ "water",
+    str_detect(Primary, "conservation") ~ "conservation",
+    str_detect(Primary, "irrigated") ~ "irrigated agriculture",
+    str_detect(Primary, "dryland") ~ "dryland agriculture",
+    str_detect(Primary, "relatively natural") ~ "grazing",
+    str_detect(Primary, "intensive") ~ "urban/intensive")) |> 
+  mutate(Landuse = case_when(
+    str_detect(Secondary, "grazing") ~ "grazing", 
+    str_detect(Secondary, "forest") ~ "forestry",
+    str_detect(Secondary, "mining") ~ "mining", 
+    TRUE ~ Landuse)) |> 
+  select(-c(Primary, Secondary))
 
 ```
 
@@ -274,10 +186,12 @@ Currently there is no defined "nice" way that we have elected to present this da
 #| label: Proportional Land Use
 
 #calculate the area of every single row, then group up and sum areas for each group
-n3_land_use_tbl <- n3_land_use_grouped |> 
-  mutate(LanduseArea = st_area(geom)) |> st_drop_geometry() |> 
+n3_land_use_tbl <- n3_land |> 
+  mutate(LanduseArea = st_area(geom)) |> 
+  st_drop_geometry() |> 
   group_by(Landuse, Region, BasinOrZone, SubBasinOrSubZone, Year) |> 
-  summarise(LanduseArea = sum(LanduseArea)) |> ungroup()
+  summarise(LanduseArea = sum(LanduseArea)) |> 
+  ungroup()
 
 #update the units to a more reasonable metric
 n3_land_use_tbl$LanduseAreaKm2 <- units::set_units(n3_land_use_tbl$LanduseArea, km^2)
@@ -311,8 +225,8 @@ for (i in 1:length(cols_to_pick)){
            XyearToXyear = paste(Year, lag(Year), sep = " to "), #create column explain what years were compared
            XyearToXyear = case_when(str_detect(XyearToXyear, "NA") ~ "1999 to 1999", #edit to fix when there is no "row above"
                                       T ~ XyearToXyear),
-           across(where(is.numeric), ~replace_na(., 0)), #replace na area and % change values with zero
-           across(where(is.numeric), round, 1)) |> ungroup()
+           across(where(is.numeric), \(x) replace_na(x, 0)), #replace na area and % change values with zero
+           across(where(is.numeric), \(x) round(x, 1))) |> ungroup()
   
   #join to main
   n3_land_use_final <- bind_rows(n3_land_use_final, temporary_table)
@@ -359,26 +273,33 @@ my_palette <- c("conservation" = "#277402",
                 "water" = "#4F81BD")
 
 #update the dataset by calling the palette colours using the landuse column in the df
-n3_land_use_grouped <- n3_land_use_grouped |> 
+n3_land <- n3_land |> 
   mutate(Palette = my_palette[Landuse])
   
 ```
 
-Then we will create a list contains name vectors of targets. Essentially providing us with the name of the column to filter (region, basin, sub_basin), and the name of the location to look for (e.g. Black, Ross, Haughton).
+Then we will create a list contains name vectors of targets. Essentially providing us with the name of the column to filter, and the name of the location to look for.
 
 ```{r}
 #| label: get list of targets
 
-#get vectors of sub_basins, basins, and regions 
-sub_basin_targets <- unique(n3_land_use_grouped$SubBasinOrSubZone)
-basin_targets <- unique(n3_land_use_grouped$BasinOrZone)
-region_targets <- unique(n3_land_use_grouped$Region)
+#get a table of unique locations that need to be mapped
+unique_locations <- n3_land |> 
+  st_drop_geometry() |> 
+  select(Region, BasinOrZone) |> 
+  unique()
 
-#if the sub basin target exists in the basin list, remove it (as it is a duplicate)
-sub_basin_targets <- sub_basin_targets[!sub_basin_targets %in% basin_targets]
+#build a list of basins within each Region
+basins_per_region <- as.list(split(unique_locations$BasinOrZone, unique_locations$Region))
 
-#and combine into a list of named vectors
-all_targets <- list("SubBasinOrSubZone" = sub_basin_targets, "BasinOrZone" = basin_targets, "Region" = region_targets)
+#join on the the list of just basins
+all_locations <- c(basins_per_region, unique_locations$BasinOrZone) 
+
+#name each item in the list
+names(all_locations) <- c(names(basins_per_region), unique_locations$BasinOrZone)
+
+#and edit the one duplicate in the naming
+names(all_locations)[1] <- "burdekin_region"
 
 ```
 
@@ -387,71 +308,77 @@ Using this list of targets we can loop over the dataset to create each map.
 ```{r}
 #| label: create the maps
 
-#load in a custom function to create the water layer
-source(here("functions/maps_water_layer.R"))
-source(here("functions/maps_inset_layer.R"))
+#map over the unique locations and create region maps
+purrr::walk2(all_locations, names(all_locations), \(x, y) {
 
-#start mapping loop
-for (i in 1:length(all_targets)){#for the number of vectors that are in the list (3)
+  #filter the main dataset
+  target_data <- n3_land |> 
+    filter(BasinOrZone %in% x)
 
-  for (j in 1:length(all_targets[[i]])){#and for the number of variables that are in the vector
-    
-    #specify both the column to filter on, and the variable to look for
-    target_data <- n3_land_use_grouped |> filter(!!sym(names(all_targets[i])) == all_targets[[i]][j])
-    target_outline <- n3_land |> filter(!!sym(names(all_targets[i])) == all_targets[[i]][j])
-    
-    #figure out the wider region in which the target is within
-    target_region <- n3_land |> filter(Region == unique(target_outline$Region))
-    
-    #create a folder to store outputs at a regional level
-    dir.create(glue("{output_path}/maps/{unique(target_region$Region)}/"))
-    
-    #run the custom water map function, pick which method based on if its region, basin, or sub basin
-    if (i == 1){maps_water_layer(target_outline, stream_order = 2, fast = T, 
-                     sub_basin_or_sub_zone = all_targets[[i]][j])}
-    if (i == 2){maps_water_layer(target_outline, stream_order = 2, fast = T, 
-                     basin_or_zone = all_targets[[i]][j])}
-    if (i == 3){maps_water_layer(target_outline, stream_order = 2, fast = T, 
-                     region = all_targets[[i]][j])}
-    
-    #run the inset map function
-    maps_inset_layer(supplied_sf_1 = target_outline, background = target_region, aspect = 0.9)
-    
-    for (k in unique(target_data$Year)){#and for each of the Years present in the data
-      
-      #select only one year
-      target_data_one_year <- target_data |> filter(Year == k)
+  #create an outline of the same location
+  target_outline <- target_data |> 
+    filter(Year == min(Year)) |> 
+    st_union() |> 
+    st_as_sf() |> 
+    st_collection_extract("POLYGON")
 
-      #create the map (don't forget to add the custom water layer)
-      map <- tm_shape(qld) +
-        tm_polygons(fill = "grey80", 
-                    col = "black") +
-        tm_shape(target_region) +
-        tm_polygons(fill = "grey90", 
-                    col = "black") +
-        tm_shape(target_data_one_year, is.main = T) +
-        tm_fill(fill = "Palette") +
-        tm_add_legend(type = "polygons", 
-                      fill = unique(target_data_one_year$Palette), 
-                      labels = unique(target_data_one_year$Landuse),
-                      title = "Land Use") +
-        water_map +
-        tm_shape(target_outline) +
-        tm_borders(col = "black") +
-        tm_layout(legend.frame = T, 
-                  legend.bg.color = "White", 
-                  legend.text.size = 0.7, 
-                  legend.position = c("left", "bottom"),
-                  asp = 1.1)
-      
-      
-      #save the map as a png
-      tmap_save(map, filename = glue("{output_path}/maps/{unique(target_region$Region)}/{all_targets[[i]][j]}_{names(all_targets[i])}_{k}_land-use.png"),
-                insets_tm = inset_map, insets_vp = inset_viewport)
+  #plus an outline of the broader region
+  target_region <- n3_land |> 
+    filter(
+      Region == unique(target_data$Region),
+      Year == min(Year)) |> 
+    st_union() |> 
+    st_as_sf() |> 
+    st_collection_extract("POLYGON")
 
-    }
+  #create the water layer for the location
+  water_layer <- maps_water_layer(x, WaterLakes = TRUE, StreamOrder = 3)
+
+  #create the inset objects for the location
+  inset_objects <- maps_inset_layer(target_outline, target_region, 1.1)
+
+  #create a string defining the save folder
+  save_folder <- glue("{output_path}/maps/{unique(target_data$Region)}/")
+
+  #create the folder if it doesn't already exist
+  if(!dir.exists(save_folder)){dir.create(save_folder)}
+
+  #for each year present in the filtered data, create a map
+  for (i in unique(target_data$Year)){
+
+    #select a year
+    single_year <- filter(target_data, Year == i)
+
+    #create the map
+    lu_map <- tm_shape(qld) +
+      tm_polygons(fill = "grey80", col = "black") +
+      tm_shape(target_region) +
+      tm_polygons(fill = "grey90", col = "black") +
+      tm_shape(single_year, is.main = TRUE) +
+      tm_fill(fill = "Palette") +
+      tm_add_legend(
+        type = "polygons", 
+        fill = unique(single_year$Palette), 
+        labels = unique(single_year$Landuse),
+        title = "Land Use") +
+      water_layer +
+      tm_shape(target_outline) +
+      tm_borders(col = "black") +
+      tm_layout(
+        legend.frame = TRUE, 
+        legend.bg.color = "White", 
+        legend.text.size = 0.7, 
+        legend.position = c("left", "bottom"),
+        asp = 1.1)
+
+    #save the map
+    tmap_save(
+      lu_map, 
+      filename = glue("{save_folder}/{y}_{i}_land_use.png"),
+      insets_tm = inset_objects[1], 
+      insets_vp = inset_objects[2])
   }
-}
+})
 
 ```
 
@@ -466,109 +393,16 @@ map
 
 ## Mapping Land Use Change
 
-Generally, it is equally important to understand not only what the current or historical landuse is, but also how the landuse has changed over time. Below we present a method to calculate land use change between years of data. This method has been converted into a function that can work for any dataset of similar structure, i.e. has a year aspect, and whose value are categorical classifications.
-
-The logic used to conduct this comparison is straight forward to understand, but requires lengthy explanation:
-
-Assume a hypothetical situation with the following area and division of land use types.
+Generally, it is equally important to understand not only what the current or historical landuse is, but also how the landuse has changed over time. A custom function has been written that conducts this analysis
 
 ```{r}
-#| label: show image 1
-#| output: true
 
-knitr::include_graphics("/references/images/n3_climate_land-use/before_after_image_1.png", error = F, rel_path = F)
+#compare two years of data
+change_in_use <- sf_change_over_time(n3_land, "Landuse", 1999, 2021)
 
-```
-
-In this example we know the type of landuse each polygon represents, as well as the total area of each polygon. We can assign colours to the polygons and create maps. This represents how we currently understand and can inspect our data.
-
-For the same area, a length of time passes, and the area and division of land use types changes.
-
-```{r}
-#| label: show image 2
-#| output: true
-
-knitr::include_graphics("/references/images/n3_climate_land-use/before_after_image_2.png", error = F, rel_path = F)
-
-```
-
-Once again, in this example we know the type of landuse each polygon represents, as well as the total area of each polygon. We can assign colours to the polygons and create maps. We can also compare the metadata we have about each of the datasets (such as the area) and create tables and plots summarizing any changes found. By looking at the tables below each map I hope that is intuitive.
-
-However, imagine trying to answer the following questions:
-1. Where in this map did forestry increase?
-2. Does the increase in forestry overshadow a decrease in forestry somewhere else?
-3. Why has agriculture not changed, even though we can visually see it has?
-
-Answers:
-1. In this example we could point at the map and say "there", but imagine trying to do this for a whole basin.
-2. We have no way to answer this at all
-3. We have not way to prove if it has changed even if we can see it has.
-
-```{r}
-#| label: show image 3
-#| output: true
-
-knitr::include_graphics("/references/images/n3_climate_land-use/before_after_image_3.png", error = F, rel_path = F)
-
-```
-
-To fix this, we need to rasterise the data. Essentially, convert the polygon (points and lines) into a grid of cells. What this allows us to do first of all, is introduce a standardised frame of reference (the grid). We can also use the different structure of the data to store information about the type of landuse as a number, each unique landuse is given a number from 1 to n unique landuses, and a table is created to decode those numbers later on. (In the real application of this method the grid will be of much greater resolution).
-
-```{r}
-#| label: show image 4
-#| output: true
-
-knitr::include_graphics("/references/images/n3_climate_land-use/before_after_image_4.png", error = F, rel_path = F)
-
-```
-
-Once we rasterise both data sets what this then allows us to do is "raster math". Where we compare each cell between each dataset and do simple addition or subtraction (side note, almost any standard equations can be applied using this method btw). The result in the cell can tell us if things changed or not. Zero would mean things haven't changed, anything other than zero means there has been a change:
-
-```{r}
-#| label: show image 5
-#| output: true
-
-knitr::include_graphics("/references/images/n3_climate_land-use/before_after_image_5.png", error = F, rel_path = F)
-
-```
-
-We can combine this knowledge to be able to answer questions such as where things changed and where things stayed the same. However this is not the final solution, imagine a scenario in which a conservation cell changed to an agriculture cell, and a second agriculture cell changed to a forestry cell. Each of these cells would have a value of "+1" (or -1 depending on how you math) - indicating that the cell has changed. However the actual land use that changed was different.
-
-To address this, the second rasterise dataset does not get assigned the numbers 1-n like the first dataset does. Instead, numbers are assigned using the following equation: 
-
-for i in n:
-
-x = i*n+1
-
-Where n is the total number of unique landuse types,
-and i is a vector from 1 to n (i.e, 1,2,3,4,5,6..., n)
-
-What this allows us to do, is calculate a unique final cell value for every single combination of landuse changes that may occur:
-
-```{r}
-#| label: show image 6
-#| output: true
-
-knitr::include_graphics("/references/images/n3_climate_land-use/before_after_image_6.png", error = F, rel_path = F)
-
-```
-
-This allows us to finally answer all of the questions asked earlier.
-
-A custom function has been written below to do the leg work of this analysis. And a simple wrapper to run the function for each of our sub basins.
-
-For this analysis we are going to compare the 1999 data against the 2021 data.
-
-```{r}
-#| label: create change use dataframe
-
-#load in the custom function used to compare the data
-source(here("functions/before_after_comparison.R"))
-
-#run the comparison function
-change_in_use <- before_after_comparison(dataset = n3_land_use_grouped, target_column = "Landuse", 
-                                         start_year = min(n3_land_use_grouped$Year), 
-                                         end_year = max(n3_land_use_grouped$Year))
+#intsect back over original to retrieve important metadata information
+change_in_use <- st_intersection(change_in_use, n3_sub_basins) |> 
+  mutate(across(where(is.character), tolower))
 
 ```
 
@@ -592,105 +426,110 @@ In the case of landuse, we end up with 64 unique "change possibilities", (which 
 #| label: create two map specific datasets
 
 #create an urban change focus table and assign colours
-#x(?!Urban/Intensive) means "x not followed by thing in brackets"
-#(?<=Urban/Intensive)x means "x not preceded by thing in brackets"
 urban_use <- change_in_use |> 
-      mutate("Change" = case_when(str_detect(ValueChange, "urban/intensive to urban/intensive") ~ "No Change",
-                                  str_detect(ValueChange, "uUrban/intensive to (?!urban/intensive\\b).*") ~ "Loss",
-                                  str_detect(ValueChange, "(?<!urban/intensive) to urban/intensive") ~ "Gain",
-                                  T ~ "Other Use"),
-             "Palette" = case_when(Change == "No Change" ~ "#FFFF00",
-                                   Change == "Loss" ~ "#277402",
-                                   Change == "Gain" ~ "#FF0000",
-                                   Change == "Other Use" ~ "#A6A6A6"))
+      mutate(
+        "Change" = case_when(
+          str_detect(ValueChange, "urban/intensive to urban/intensive") ~ "No Change",
+          str_detect(ValueChange, "uUrban/intensive to (?!urban/intensive\\b).*") ~ "Loss",
+          str_detect(ValueChange, "(?<!urban/intensive) to urban/intensive") ~ "Gain",
+          TRUE ~ "Other Use"),
+        "Palette" = case_when(
+          Change == "No Change" ~ "#FFFF00",
+          Change == "Loss" ~ "#277402",
+          Change == "Gain" ~ "#FF0000",
+          Change == "Other Use" ~ "#A6A6A6"))
 
+#create a conservation focused table and assign colours
 conservation_use <- change_in_use |> 
-      mutate("Change" = case_when(str_detect(ValueChange, "conservation to conservation") ~ "No Change",
-                                  str_detect(ValueChange, "conservation to (?!conservation\\b).*") ~ "Loss",
-                                  str_detect(ValueChange, "(?<!conservation) to conservation") ~ "Gain",
-                                  T ~ "Other Use"),
-             "Palette" = case_when(Change == "No Change" ~ "#FFFF00",
-                                   Change == "Loss" ~ "#FF0000",
-                                   Change == "Gain" ~ "#277402",
-                                   Change == "Other Use" ~ "#A6A6A6"))
+      mutate(
+        "Change" = case_when(
+          str_detect(ValueChange, "conservation to conservation") ~ "No Change",
+          str_detect(ValueChange, "conservation to (?!conservation\\b).*") ~ "Loss",
+          str_detect(ValueChange, "(?<!conservation) to conservation") ~ "Gain",
+          TRUE ~ "Other Use"),
+        "Palette" = case_when(
+          Change == "No Change" ~ "#FFFF00",
+          Change == "Loss" ~ "#FF0000",
+          Change == "Gain" ~ "#277402",
+          Change == "Other Use" ~ "#A6A6A6"))
+
+#combine the two datasets into a list
+focused_landuse <- list(urban_use, conservation_use)
+
+#and give them names
+names(focused_landuse) <- c("urban", "conservation")
 
 ```
 
 ```{r}
 #| label: map urban and conservation land types
 
-#load in a custom function to create the water layer (this may be a reload depending on if previous mapping chunk was run)
-source(here("functions/maps_water_layer.R"))
-source(here("functions/maps_inset_layer.R"))
+#map over the two dataset types, the (nested) map over over the unique locations and create maps
+purrr::walk2(focused_landuse, names(focused_landuse), \(df, df_name){
+  purrr::walk2(all_locations, names(all_locations), \(location, location_name) {
 
-#start mapping loop
-for (i in 1:length(all_targets)){#for the number of vectors that are in the list (3)
+    #filter the focused landuse dataset
+    target_data <- df |> 
+      filter(BasinOrZone %in% location)
 
-  for (j in 1:length(all_targets[[i]])){#and for the number of variables that are in the vector
-    
-    #get the outline of the general area we are focused on
-    target_outline <- n3_land |> filter(!!sym(names(all_targets[i])) == all_targets[[i]][j])
-    
-    #figure out the wider region in which the target is within
-    target_region <- n3_land |> filter(Region == unique(target_outline$Region))
-      
-    #create a folder to store outputs at a regional level
-    dir.create(glue("{output_path}/maps/{unique(target_region$Region)}/"))
-      
-    #run the custom water map function, pick which method based on if its region, basin, or sub basin
-    if (i == 1){maps_water_layer(target_outline, stream_order = 2, fast = T, 
-                     sub_basin_or_sub_zone = all_targets[[i]][j])}
-    if (i == 2){maps_water_layer(target_outline, stream_order = 2, fast = T, 
-                     basin_or_zone = all_targets[[i]][j])}
-    if (i == 3){maps_water_layer(target_outline, stream_order = 2, fast = T, 
-                     region = all_targets[[i]][j])}
-    
-    #set some variables to swap between
-    data_focus <- c("urban_use", "conservation_use")
-    
-    for (k in 1:length(data_focus)){
-    
-      #specify both the column to filter on, and the variable to look for
-      target_data <- get(data_focus[k]) |> filter(!!sym(names(all_targets[i])) == all_targets[[i]][j])
-      
-      #get a nice version of the data we are focusing on
-      data_title <- str_to_title(str_replace_all(data_focus, "_", " "))
-      
-      #run the inset map function
-      maps_inset_layer(supplied_sf_1 = target_outline, background = target_region, aspect = 0.9)
+    #create an outline of the same location
+    target_outline <- target_data |> 
+      st_union() |> 
+      st_as_sf() |> 
+      st_collection_extract("POLYGON")
 
-      #create the map (dont forget to add the custom water layer)
-      map <- tm_shape(qld) +
-        tm_polygons(fill = "grey80", 
-                    col = "black") +
-        tm_shape(target_region) +
-        tm_polygons(fill = "grey90", 
-                    col = "black") +
-        tm_shape(target_data, is.main = T) +
-        tm_fill(fill = "Palette") +
-        tm_add_legend(type = "polygons", 
-                      fill = unique(target_data$Palette), 
-                      labels = unique(target_data$Change),
-                      title = glue("{data_title[k]} Change")) +
-        water_map +
-        tm_shape(target_outline) +
-        tm_borders(col = "black") +
-        tm_layout(legend.frame = T, 
-                  legend.bg.color = "White", 
-                  legend.text.size = 0.7, 
-                  legend.position = c("left", "bottom"),
-                  asp = 1.1) +
-        tm_add_legend(type = "lines", 
-                      col = "dodgerblue", 
-                      lwd = 2,
-                      labels = "Watercourses")
-      
-        #save the map as a png
-        tmap_save(map, filename = glue("{output_path}/maps/{unique(target_region$Region)}/{all_targets[[i]][j]}_{names(all_targets[i])}_{data_focus[k]}.png"),
-                  insets_tm = inset_map, insets_vp = inset_viewport)
-    }
-  }
-}
+    #plus an outline of the broader region
+    target_region <- n3_land |> 
+      filter(
+        Region == unique(target_data$Region),
+        Year == min(Year)) |> 
+      st_union() |> 
+      st_as_sf() |> 
+      st_collection_extract("POLYGON")
+
+    #create the water layer for the location
+    water_layer <- maps_water_layer(location, WaterLakes = TRUE, StreamOrder = 3)
+
+    #create the inset objects for the location
+    inset_objects <- maps_inset_layer(target_outline, target_region, 1.1)
+
+    #create a string defining the save folder
+    save_folder <- glue("{output_path}/maps/{unique(target_data$Region)}/")
+
+    #create the folder if it doesn't already exist
+    if(!dir.exists(save_folder)){dir.create(save_folder)}
+
+    #create the map (dont forget to add the custom water layer)
+    lu_change_map <- tm_shape(qld) +
+      tm_polygons(fill = "grey80", col = "black") +
+      tm_shape(target_region) +
+      tm_polygons(fill = "grey90", col = "black") +
+      tm_shape(target_data, is.main = TRUE) +
+      tm_fill(fill = "Palette") +
+      tm_add_legend(
+        type = "polygons", 
+        fill = unique(target_data$Palette), 
+        labels = unique(target_data$Change),
+        title = "Landuse Change") +
+      water_layer +
+      tm_shape(target_outline) +
+      tm_borders(col = "black") +
+      tm_layout(
+        legend.frame = TRUE, 
+        legend.bg.color = "White", 
+        legend.text.size = 0.7, 
+        legend.position = c("left", "bottom"),
+        asp = 1.1)
+        
+    #save the map as a png
+    tmap_save(
+      lu_change_map, 
+      filename = glue("{save_folder}/{location_name}_{df_name}_use_change.png"),
+      insets_tm = inset_objects[1], 
+      insets_vp = inset_objects[2])
+
+  })
+})
 
 ```
 
@@ -701,39 +540,41 @@ The other visualisation that is useful to gain perspective on land use in each b
 ```{r}
 #| label: land use graphs
 
-#convert proportion of total and year to numeric
-n3_land_use_final <- n3_land_use_final |> mutate(LanduseProportionOfTotalPercent = as.numeric(LanduseProportionOfTotalPercent),
-                                                 Year = as.numeric(Year))
+#use the dataset built during the initial analysis phase
+n3_land_use_final <- n3_land_use_final |> 
+  mutate(
+    LanduseProportionOfTotalPercent = as.numeric(LanduseProportionOfTotalPercent), 
+    Year = as.numeric(Year))
 
 #assign names to my palette so ggplot can colour everything correctly
-names(my_palette) <- unique(n3_land_use$Landuse)
+names(my_palette) <- unique(n3_land_use_final$Landuse)
 
-for (i in basin_targets){
+for (i in unique_locations$BasinOrZone){
   
   #select a specific basin and the latest year
-  basin_plot <- n3_land_use_final |> filter(BasinOrZone == i, Year == 2021) |> 
+  basin_plot <- n3_land_use_final |> 
+    filter(BasinOrZone == i, Year == max(n3_land_use_final$Year)) |> 
     arrange(desc(LanduseProportionOfTotalPercent)) |> 
     mutate(Landuse = factor(Landuse, levels = unique(Landuse)))
   
   #create a plot
   plot <- ggplot(basin_plot, aes(fill = Landuse, x = Year, y = LanduseProportionOfTotalPercent)) +
-    geom_bar(position = position_fill(reverse = T), stat = "identity") +
+    geom_bar(position = position_fill(reverse = TRUE), stat = "identity") +
     scale_fill_manual(values = my_palette) +
     scale_x_discrete(expand = c(0.025, 0)) +
     scale_y_continuous(expand = c(0, 0), labels = scales::percent_format(accuracy = 1)) +
     labs(x = "", y = "", fill = glue("{i} Basin Land Use")) +
-    theme(axis.text.x = element_text(colour = "black"),
-          axis.text.y = element_blank(),
-          axis.line.x = element_line(colour = "black"),
-          axis.ticks.length = unit(-0.15, "cm"),
-          panel.background = element_blank()) +
+    theme(
+      axis.text.x = element_text(colour = "black"),
+      axis.text.y = element_blank(),
+      axis.line.x = element_line(colour = "black"),
+      axis.ticks.length = unit(-0.15, "cm"),
+      panel.background = element_blank()) +
     coord_flip()
   
   #save
   ggsave(glue("{output_path}/plots/{i}_land-use.png"), plot, width = 12, height = 4)
 }
-
-
 
 ```
 
