@@ -138,7 +138,7 @@ cropped_file_loc <- glue("{data_path}/processed/")
 n3_region <- n3_region
 
 #download, save, crop, and build the data
-n3_sst <- extract_sst(full_file_loc, cropped_file_loc, n3_region)
+n3_sst <- sst_extract(full_file_loc, cropped_file_loc, n3_region)
 
 #update the crs of the data to match the n3 region geometry
 n3_sst <- st_warp(n3_sst, crs = "EPSG:7855")
@@ -599,8 +599,8 @@ In the first code chunk we create each of the raster layers required.
 ```{r}
 #| label: get map for current year
 
-#use the aggregation helper to group data into annual layers
-n3_sst_annual <- nc_aggregation_helper(n3_sst, "Annual")
+#use the aggregation helper to group data into financial years
+n3_sst_annual <- nc_aggregation_helper(n3_sst, "Financial")
 
 #pull out the most recent layer
 cy_sst_map <- n3_sst_annual[,,,which(st_get_dimension_values(n3_sst_annual, "time") %in% script_fyear)]

@@ -126,6 +126,9 @@ cropped_data_path <- glue("{data_path}/processed/")
 #run custom function
 n3_land <- extract_land_use(raw_data_path, cropped_data_path, n3_sub_basins)
 
+#save this output for the odd occasion where the data needs to be exported for use somewhere else
+st_write(n3_land, glue("{data_path}/processed/n3_landuse_full.gpkg"))
+
 #names need to be made lowercase for simplicity later
 n3_land <- n3_land |> 
   mutate(across(where(is.character), tolower))
