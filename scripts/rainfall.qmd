@@ -408,12 +408,12 @@ The standard plot that we create for all climate indicators is a line plot of da
 #| label: plotting annual mean against percentage difference from mean
 
 #set up variables for the background data
-groups <- factor(c("200-250%", "150-200%", "125-150%", "100-125%", "80-100%", "60-80%", "40-60%", "20-40%", "0-20%"),
-                 levels = c("200-250%", "150-200%", "125-150%", "100-125%", "80-100%", "60-80%", 
+groups <- factor(c("250%+", "200-250%", "150-200%", "125-150%", "100-125%", "80-100%", "60-80%", "40-60%", "20-40%", "0-20%"),
+                 levels = c("250%+", "200-250%", "150-200%", "125-150%", "100-125%", "80-100%", "60-80%", 
                             "40-60%", "20-40%", "0-20%"))
 
 #set up variables for the background data  
-transformer <- c(2, 1.5, 1.25, 1, 0.8, 0.6, 0.4, 0.2, 0)
+transformer <- c(2.5, 2, 1.5, 1.25, 1, 0.8, 0.6, 0.4, 0.2, 0)
 
 #set up variables for the background data
 x = rep(c(1911, script_fyear+1), each = length(groups))
@@ -451,8 +451,8 @@ for (i in unique(n3_basins$Region)){
       Yhi = region_ltm * lag(Transformer)) |> 
     mutate(
       Yhi = case_when(
-        is.na(Yhi) ~ region_ltm * 2.5,
-        Yhi == 0 ~ region_ltm * 2.5,
+        is.na(Yhi) ~ region_ltm * 3,
+        Yhi == 0 ~ region_ltm * 3,
         TRUE ~ Yhi)) |> 
     mutate(across(where(is.numeric), \(x) round(x, 0)))
   
@@ -516,8 +516,8 @@ for (i in unique(n3_basins$Region)){
     basin_df <- df |> mutate(Y = basin_ltm) |>
       mutate(Ylo = basin_ltm * Transformer,
              Yhi = basin_ltm * lag(Transformer)) |> 
-      mutate(Yhi = case_when(is.na(Yhi) ~ basin_ltm * 2.5,
-                             Yhi == 0 ~ basin_ltm * 2.5,
+      mutate(Yhi = case_when(is.na(Yhi) ~ basin_ltm * 3,
+                             Yhi == 0 ~ basin_ltm * 3,
                              T ~ Yhi)) |> 
       mutate(across(where(is.numeric), \(x) round(x, 0)))
     
@@ -822,7 +822,7 @@ In the first code chunk we create each of the raster layers required.
 #| label: get map for current year
 
 #use the aggregation helper to group data into financial years
-n3_rain_annual <- nc_aggregation_helper(n3_rain, "Financial")
+n3_rain_annual <- nc_aggregation_helper(n3_rain, "Financial", sum)
 
 #pull out the most recent layer
 cy_rain_map <- n3_rain_annual[,,,which(st_get_dimension_values(n3_rain_annual, "time") %in% script_fyear)]
@@ -859,7 +859,6 @@ rain_all <- do.call(c, c(all_anom_layers, list(along = "time")))
 rain_all_crop <- nc_high_res_crop(rain_all, n3_basins, 6)
 cy_rain_map_crop <- nc_high_res_crop(cy_rain_map, n3_basins, 6)
 anom_rain_map_crop <- nc_high_res_crop(anom_rain_map, n3_basins, 6)
-
 
 ```
 
